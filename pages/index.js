@@ -1,202 +1,147 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
-export default function Home() {
-  const [rows, setRows] = useState([]);
+export default function Dashboard() {
+  const [urls, setUrls] = useState([]);
+  const [results, setResults] = useState({});
+  const [selected, setSelected] = useState(null);
   const [running, setRunning] = useState(false);
+  const [apiKey, setApiKey] = useState("");
 
-  const handleFileUpload = (e) => {
+  useEffect(() => {
+    const stored = localStorage.getItem("results");
+    if (stored) setResults(JSON.parse(stored));
+    const key = process.env.NEXT_PUBLIC_GOOGLE_API_KEY;
+    if (key) setApiKey(key);
+  }, []);
+
+  const handleFile = (e) => {
     const file = e.target.files[0];
-    if (!file) return;
     const reader = new FileReader();
-    reader.onload = (evt) => {
-      const text = evt.target.result;
-      const lines = text.split(/\r?\n/).filter(Boolean);
-      const parsed = lines.map((url) => ({
-        url: url.trim(),
-        mobile: {},
-        desktop: {},
-        status: "Pending",
-      }));
-      setRows(parsed);
+    reader.onload = (event) => {
+      const lines = event.target.result.split("\n").map((l) => l.trim()).filter(Boolean);
+      const clean = lines.slice(1).map((line) => line.replace(/['"]+/g, ""));
+      setUrls(clean);
     };
     reader.readAsText(file);
   };
 
-  const delay = (ms) => new Promise((res) => setTimeout(res, ms));
-
-  const fetchMetrics = async (url, strategy, apiKey) => {
-    const res = await fetch(
-      `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(
-        url
-      )}&strategy=${strategy}&category=performance&key=${apiKey}`
-    );
-    const data = await res.json();
-    const lr = data.lighthouseResult;
-
-    if (!lr) return { error: true };
-
-    const audits = lr.audits;
-
-    return {
-      score: lr.categories.performance.score * 100,
-      FCP: audits["first-contentful-paint"].displayValue,
-      LCP: audits["largest-contentful-paint"].displayValue,
-      TBT: audits["total-blocking-time"].displayValue,
-      CLS: audits["cumulative-layout-shift"].displayValue,
-      SI: audits["speed-index"].displayValue,
-      treemap:
-        data.analysisUTCTimestamp && data.id
-          ? `https://googlechrome.github.io/lighthouse/treemap/?load=${encodeURIComponent(
-              `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(
-                url
-              )}&strategy=${strategy}&category=performance&key=${apiKey}`
-            )}`
-          : "",
-    };
-  };
-
-  const runPageSpeed = async () => {
-    if (running) return;
+  const runTests = async () => {
+    if (!apiKey) return alert("Missing API key!");
     setRunning(true);
-    const apiKey = process.env.NEXT_PUBLIC_PAGESPEED_API_KEY;
-    const updatedRows = [...rows];
 
-    for (let i = 0; i < updatedRows.length; i++) {
-      const row = updatedRows[i];
-      updatedRows[i].status = "Running...";
-      setRows([...updatedRows]);
-
+    let newResults = { ...results };
+    for (let url of urls) {
+      if (newResults[url]) continue;
       try {
-        const mobileMetrics = await fetchMetrics(row.url, "mobile", apiKey);
-        await delay(2000);
-        const desktopMetrics = await fetchMetrics(row.url, "desktop", apiKey);
-
-        updatedRows[i] = {
-          ...row,
-          mobile: mobileMetrics,
-          desktop: desktopMetrics,
-          status: "✅ Done",
-        };
-      } catch (err) {
-        updatedRows[i].status = "❌ Error";
+        const desktop = await fetchReport(url, "desktop");
+        const mobile = await fetchReport(url, "mobile");
+        newResults[url] = { desktop, mobile };
+        setResults({ ...newResults });
+        localStorage.setItem("results", JSON.stringify(newResults));
+      } catch (e) {
+        console.error("Error fetching", url, e);
       }
-
-      setRows([...updatedRows]);
-      await delay(2000);
+      await new Promise((r) => setTimeout(r, 3000)); // delay
     }
-
     setRunning(false);
   };
 
-  return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <h1 className="text-3xl font-bold text-center mb-6 text-gray-800">
-        🚀 PageSpeed Insights Dashboard
-      </h1>
+  const fetchReport = async (url, strategy) => {
+    const res = await fetch(
+      `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(
+        url
+      )}&strategy=${strategy}&key=${apiKey}`
+    );
+    const data = await res.json();
+    const audits = data.lighthouseResult?.audits || {};
+    return {
+      FCP: audits["first-contentful-paint"]?.displayValue || "N/A",
+      LCP: audits["largest-contentful-paint"]?.displayValue || "N/A",
+      TBT: audits["total-blocking-time"]?.displayValue || "N/A",
+      CLS: audits["cumulative-layout-shift"]?.displayValue || "N/A",
+      SpeedIndex: audits["speed-index"]?.displayValue || "N/A",
+      screenshot: audits["final-screenshot"]?.details?.data || null,
+      treemap: data.lighthouseResult?.fullPageScreenshot?.screenshot?.data || null,
+    };
+  };
 
-      <div className="flex justify-center gap-4 mb-6">
-        <input
-          type="file"
-          accept=".csv"
-          onChange={handleFileUpload}
-          className="border p-2 rounded bg-white shadow"
-        />
-        <button
-          onClick={runPageSpeed}
-          disabled={running || rows.length === 0}
-          className={`px-5 py-2 rounded text-white font-semibold shadow ${
-            running ? "bg-gray-400" : "bg-green-600 hover:bg-green-700"
-          }`}
-        >
-          {running ? "Running..." : "Run PageSpeed"}
-        </button>
+  return (
+    <div className="flex h-screen font-sans bg-gray-100">
+      {/* Sidebar */}
+      <div className="w-1/4 bg-white border-r overflow-y-auto">
+        <div className="p-4 border-b">
+          <h2 className="text-xl font-bold">Domains</h2>
+          <input type="file" accept=".csv" className="mt-3" onChange={handleFile} />
+          <button
+            onClick={runTests}
+            disabled={running || urls.length === 0}
+            className={`mt-3 w-full py-2 rounded ${
+              running ? "bg-gray-400" : "bg-blue-600 hover:bg-blue-700"
+            } text-white font-semibold`}
+          >
+            {running ? "Running..." : "Run PageSpeed"}
+          </button>
+        </div>
+        <ul>
+          {Object.keys(results).map((url) => (
+            <li
+              key={url}
+              onClick={() => setSelected(url)}
+              className={`p-3 cursor-pointer hover:bg-blue-50 ${
+                selected === url ? "bg-blue-100 font-semibold" : ""
+              }`}
+            >
+              {url}
+            </li>
+          ))}
+        </ul>
       </div>
 
-      <table className="min-w-full bg-white border shadow text-sm">
-        <thead className="bg-gray-100 text-gray-700">
-          <tr>
-            <th className="border px-2 py-2">#</th>
-            <th className="border px-2 py-2">URL</th>
-            <th className="border px-2 py-2">Mobile Score</th>
-            <th className="border px-2 py-2">FCP (Mobile)</th>
-            <th className="border px-2 py-2">LCP (Mobile)</th>
-            <th className="border px-2 py-2">TBT (Mobile)</th>
-            <th className="border px-2 py-2">CLS (Mobile)</th>
-            <th className="border px-2 py-2">SI (Mobile)</th>
-            <th className="border px-2 py-2">Treemap (Mobile)</th>
-
-            <th className="border px-2 py-2">Desktop Score</th>
-            <th className="border px-2 py-2">FCP (Desktop)</th>
-            <th className="border px-2 py-2">LCP (Desktop)</th>
-            <th className="border px-2 py-2">TBT (Desktop)</th>
-            <th className="border px-2 py-2">CLS (Desktop)</th>
-            <th className="border px-2 py-2">SI (Desktop)</th>
-            <th className="border px-2 py-2">Treemap (Desktop)</th>
-
-            <th className="border px-2 py-2">Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, idx) => (
-            <tr key={idx} className="text-center">
-              <td className="border px-2 py-2">{idx + 1}</td>
-              <td className="border px-2 py-2 text-blue-600 underline">
-                <a href={row.url} target="_blank" rel="noopener noreferrer">
-                  {row.url}
-                </a>
-              </td>
-
-              <td className="border px-2 py-2 font-semibold text-green-700">
-                {row.mobile.score || ""}
-              </td>
-              <td className="border px-2 py-2">{row.mobile.FCP || ""}</td>
-              <td className="border px-2 py-2">{row.mobile.LCP || ""}</td>
-              <td className="border px-2 py-2">{row.mobile.TBT || ""}</td>
-              <td className="border px-2 py-2">{row.mobile.CLS || ""}</td>
-              <td className="border px-2 py-2">{row.mobile.SI || ""}</td>
-              <td className="border px-2 py-2">
-                {row.mobile.treemap && (
-                  <a
-                    href={row.mobile.treemap}
-                    target="_blank"
-                    className="text-indigo-600 underline"
-                  >
-                    View Treemap
-                  </a>
-                )}
-              </td>
-
-              <td className="border px-2 py-2 font-semibold text-green-700">
-                {row.desktop.score || ""}
-              </td>
-              <td className="border px-2 py-2">{row.desktop.FCP || ""}</td>
-              <td className="border px-2 py-2">{row.desktop.LCP || ""}</td>
-              <td className="border px-2 py-2">{row.desktop.TBT || ""}</td>
-              <td className="border px-2 py-2">{row.desktop.CLS || ""}</td>
-              <td className="border px-2 py-2">{row.desktop.SI || ""}</td>
-              <td className="border px-2 py-2">
-                {row.desktop.treemap && (
-                  <a
-                    href={row.desktop.treemap}
-                    target="_blank"
-                    className="text-indigo-600 underline"
-                  >
-                    View Treemap
-                  </a>
-                )}
-              </td>
-
-              <td className="border px-2 py-2">{row.status}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-
-      {rows.length === 0 && (
-        <p className="text-center mt-6 text-gray-500">
-          Upload a CSV with one column of URLs (no header required).
-        </p>
-      )}
+      {/* Main Panel */}
+      <div className="flex-1 p-6 overflow-y-auto">
+        {!selected ? (
+          <div className="text-gray-500 text-center mt-20">Select a domain from the sidebar</div>
+        ) : (
+          <>
+            <h2 className="text-2xl font-bold mb-4">{selected}</h2>
+            <div className="grid grid-cols-2 gap-6">
+              {["desktop", "mobile"].map((type) => (
+                <div key={type} className="bg-white shadow rounded-lg p-4">
+                  <h3 className="text-lg font-semibold capitalize mb-3">{type}</h3>
+                  {results[selected]?.[type] ? (
+                    <>
+                      <ul className="text-sm space-y-2">
+                        {Object.entries(results[selected][type])
+                          .filter(([key]) => key !== "screenshot" && key !== "treemap")
+                          .map(([metric, value]) => (
+                            <li key={metric} className="flex justify-between">
+                              <span className="font-medium">{metric}</span>
+                              <span>{value}</span>
+                            </li>
+                          ))}
+                      </ul>
+                      <div className="mt-4">
+                        {results[selected][type].treemap && (
+                          <div>
+                            <h4 className="text-sm font-semibold mb-2">Treemap Screenshot</h4>
+                            <img
+                              src={results[selected][type].treemap}
+                              alt="Treemap"
+                              className="rounded-lg border"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-gray-400">No data</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
