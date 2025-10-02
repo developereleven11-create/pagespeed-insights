@@ -1,195 +1,238 @@
-import { useState, useEffect } from "react";
-
-export default function Dashboard() {
-  const [urls, setUrls] = useState([]);
-  const [results, setResults] = useState({});
-  const [selected, setSelected] = useState(null);
-  const [running, setRunning] = useState(false);
-  const [apiKey, setApiKey] = useState("");
-  const [progress, setProgress] = useState(0);
-
-  useEffect(() => {
-    const stored = localStorage.getItem("results");
-    if (stored) setResults(JSON.parse(stored));
-    const key = process.env.NEXT_PUBLIC_GOOGLE_API_KEY;
-    if (key) setApiKey(key);
-  }, []);
-
-  const handleFile = (e) => {
-    const file = e.target.files[0];
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const lines = event.target.result
-        .split("\n")
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0);
-
-      let clean = [];
-      if (lines[0].toLowerCase().includes("url")) {
-        clean = lines.slice(1);
-      } else {
-        clean = lines;
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PageSpeed Batch Runner</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        display: flex;
+        height: 100vh;
+        background: #f6f8fa;
       }
-
-      clean = clean.map((line) =>
-        line
-          .replace(/['"]+/g, "")
-          .replace(/\r/g, "")
-          .trim()
-      );
-
-      setUrls(clean);
-      setProgress(0);
-    };
-    reader.readAsText(file);
-  };
-
-  const runTests = async () => {
-    if (!apiKey) return alert("Missing API key!");
-    if (urls.length === 0) return alert("No URLs found!");
-
-    setRunning(true);
-    let newResults = { ...results };
-
-    for (let i = 0; i < urls.length; i++) {
-      const url = urls[i];
-      newResults[url] = newResults[url] || { status: "Running" };
-      setResults({ ...newResults });
-
-      try {
-        const desktop = await fetchReport(url, "desktop");
-        const mobile = await fetchReport(url, "mobile");
-        newResults[url] = { desktop, mobile, status: "Done" };
-        setResults({ ...newResults });
-        localStorage.setItem("results", JSON.stringify(newResults));
-      } catch (e) {
-        newResults[url] = { status: "Error" };
-        console.error("Error fetching", url, e);
+      .sidebar {
+        width: 280px;
+        background: #1e1e2f;
+        color: white;
+        padding: 1rem;
+        overflow-y: auto;
       }
-      setProgress(Math.round(((i + 1) / urls.length) * 100));
-      await new Promise((r) => setTimeout(r, 3000)); // delay
-    }
-    setRunning(false);
-  };
-
-  const fetchReport = async (url, strategy) => {
-    const res = await fetch(
-      `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(
-        url
-      )}&strategy=${strategy}&category=performance&key=${apiKey}`
-    );
-    const data = await res.json();
-    const audits = data.lighthouseResult?.audits || {};
-    return {
-      score:
-        (data.lighthouseResult?.categories?.performance?.score || 0) * 100,
-      FCP: audits["first-contentful-paint"]?.displayValue || "N/A",
-      LCP: audits["largest-contentful-paint"]?.displayValue || "N/A",
-      TBT: audits["total-blocking-time"]?.displayValue || "N/A",
-      CLS: audits["cumulative-layout-shift"]?.displayValue || "N/A",
-      SpeedIndex: audits["speed-index"]?.displayValue || "N/A",
-    };
-  };
-
-  return (
-    <div className="flex h-screen font-sans bg-gray-100">
-      {/* Sidebar */}
-      <div className="w-1/4 bg-white border-r flex flex-col">
-        <div className="p-4 border-b">
-          <h2 className="text-xl font-bold">Domains</h2>
-          <input type="file" accept=".csv" className="mt-3" onChange={handleFile} />
-          <button
-            onClick={runTests}
-            disabled={running || urls.length === 0}
-            className={`mt-3 w-full py-2 rounded ${
-              running ? "bg-gray-400" : "bg-blue-600 hover:bg-blue-700"
-            } text-white font-semibold`}
-          >
-            {running ? "Running..." : "Run PageSpeed"}
-          </button>
-          {running && (
-            <div className="mt-3">
-              <div className="w-full bg-gray-200 rounded-full h-2.5">
-                <div
-                  className="bg-blue-600 h-2.5 rounded-full"
-                  style={{ width: `${progress}%` }}
-                ></div>
-              </div>
-              <p className="text-xs mt-1 text-center text-gray-600">{progress}% completed</p>
-            </div>
-          )}
-        </div>
-        <ul className="flex-1 overflow-y-auto">
-          {urls.length === 0 ? (
-            <li className="p-4 text-gray-400 text-center">Upload a CSV to begin</li>
-          ) : (
-            urls.map((url) => (
-              <li
-                key={url}
-                onClick={() => setSelected(url)}
-                className={`cursor-pointer p-3 border-b hover:bg-gray-100 ${
-                  selected === url ? "bg-gray-200 font-semibold" : ""
-                }`}
-              >
-                <p className="truncate">{url}</p>
-                <p
-                  className={`text-xs ${
-                    results[url]?.status === "Done"
-                      ? "text-green-600"
-                      : results[url]?.status === "Running"
-                      ? "text-blue-600"
-                      : results[url]?.status === "Error"
-                      ? "text-red-600"
-                      : "text-gray-400"
-                  }`}
-                >
-                  {results[url]?.status || "Pending"}
-                </p>
-              </li>
-            ))
-          )}
-        </ul>
-      </div>
-
-      {/* Main content */}
-      <div className="flex-1 p-6 overflow-y-auto">
-        {!selected ? (
-          <p className="text-gray-500 text-lg">Select a domain from the sidebar</p>
-        ) : !results[selected] || !results[selected].desktop ? (
-          <p className="text-gray-500 text-lg">Results not yet available for {selected}</p>
-        ) : (
-          <div>
-            <h2 className="text-2xl font-bold mb-4">{selected}</h2>
-            <div className="grid grid-cols-2 gap-6">
-              {["desktop", "mobile"].map((type) => (
-                <div key={type} className="bg-white rounded-lg shadow p-4">
-                  <h3 className="text-lg font-semibold capitalize mb-2">
-                    {type} Report
-                  </h3>
-                  <p className="text-sm text-gray-500 mb-2">
-                    Performance Score:{" "}
-                    <span className="font-bold text-blue-600">
-                      {results[selected][type]?.score || "N/A"}
-                    </span>
-                  </p>
-                  <table className="w-full text-sm">
-                    <tbody>
-                      {["FCP", "LCP", "TBT", "CLS", "SpeedIndex"].map((metric) => (
-                        <tr key={metric} className="border-b">
-                          <td className="py-1 font-medium">{metric}</td>
-                          <td className="py-1 text-right">
-                            {results[selected][type][metric]}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+      .sidebar h2 {
+        font-size: 1.2rem;
+        margin-bottom: 1rem;
+      }
+      .domain-item {
+        padding: 0.6rem;
+        background: #2a2a40;
+        margin-bottom: 0.5rem;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .domain-item:hover {
+        background: #353556;
+      }
+      .main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        padding: 1.5rem;
+        overflow-y: auto;
+      }
+      h1 {
+        margin-bottom: 1rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: white;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 0 5px rgba(0, 0, 0, 0.05);
+      }
+      th, td {
+        border: 1px solid #ddd;
+        padding: 8px;
+        text-align: center;
+      }
+      th {
+        background: #f0f0f0;
+      }
+      button {
+        padding: 8px 16px;
+        background: #007bff;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #0056b3;
+      }
+      .filmstrip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 10px;
+      }
+      .filmstrip img {
+        width: 90px;
+        border-radius: 4px;
+        border: 1px solid #ddd;
+      }
+      .status {
+        padding: 4px 8px;
+        border-radius: 4px;
+        color: white;
+        font-weight: 500;
+      }
+      .status.Pending { background: #999; }
+      .status.Running { background: #f0ad4e; }
+      .status.Completed { background: #5cb85c; }
+      .status.Error { background: #d9534f; }
+    </style>
+  </head>
+  <body>
+    <div class="sidebar">
+      <h2>Domains</h2>
+      <div id="domainList"></div>
+      <div id="filmstrip"></div>
     </div>
-  );
-}
+    <div class="main">
+      <h1>Batch PageSpeed Runner</h1>
+      <input type="file" id="fileInput" accept=".csv" />
+      <button id="runBtn">Run PageSpeed</button>
+      <table id="resultTable">
+        <thead>
+          <tr>
+            <th>URL</th>
+            <th>Status</th>
+            <th>Desktop Score</th>
+            <th>Mobile Score</th>
+            <th>FCP</th>
+            <th>LCP</th>
+            <th>CLS</th>
+            <th>TBT</th>
+            <th>Treemap</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <script>
+      const apiKey = "YOUR_API_KEY"; // Replace with your API key
+      let domains = [];
+      const tableBody = document.querySelector("#resultTable tbody");
+      const domainList = document.getElementById("domainList");
+      const filmstripDiv = document.getElementById("filmstrip");
+
+      document.getElementById("fileInput").addEventListener("change", handleFile);
+      document.getElementById("runBtn").addEventListener("click", runBatch);
+
+      function handleFile(e) {
+        const file = e.target.files[0];
+        const reader = new FileReader();
+        reader.onload = function(evt) {
+          const lines = evt.target.result.split("\n").map(l => l.trim()).filter(Boolean);
+          domains = lines.slice(1).map(row => row.replace(/^https?:\/\//, '').replace(/\/$/, '')).map(d => "https://" + d);
+          renderTable();
+          renderSidebar();
+        };
+        reader.readAsText(file);
+      }
+
+      function renderTable() {
+        tableBody.innerHTML = "";
+        domains.forEach(url => {
+          const row = document.createElement("tr");
+          row.innerHTML = `
+            <td>${url}</td>
+            <td class="status Pending">Pending</td>
+            <td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>
+            <td><button disabled>Treemap</button></td>`;
+          tableBody.appendChild(row);
+        });
+      }
+
+      function renderSidebar() {
+        domainList.innerHTML = "";
+        domains.forEach((url, idx) => {
+          const div = document.createElement("div");
+          div.className = "domain-item";
+          div.textContent = url;
+          div.onclick = () => showFilmstrip(url);
+          domainList.appendChild(div);
+        });
+      }
+
+      async function runBatch() {
+        for (let i = 0; i < domains.length; i++) {
+          const url = domains[i];
+          const row = tableBody.rows[i];
+          const statusCell = row.cells[1];
+          statusCell.textContent = "Running";
+          statusCell.className = "status Running";
+
+          try {
+            const desktopData = await fetchPageSpeed(url, "desktop");
+            const mobileData = await fetchPageSpeed(url, "mobile");
+            const desktopScore = desktopData.lighthouseResult.categories.performance.score * 100;
+            const mobileScore = mobileData.lighthouseResult.categories.performance.score * 100;
+            const audits = desktopData.lighthouseResult.audits;
+
+            const fcp = audits["first-contentful-paint"].displayValue;
+            const lcp = audits["largest-contentful-paint"].displayValue;
+            const cls = audits["cumulative-layout-shift"].displayValue;
+            const tbt = audits["total-blocking-time"].displayValue;
+
+            row.cells[2].textContent = desktopScore;
+            row.cells[3].textContent = mobileScore;
+            row.cells[4].textContent = fcp;
+            row.cells[5].textContent = lcp;
+            row.cells[6].textContent = cls;
+            row.cells[7].textContent = tbt;
+            row.cells[1].textContent = "Completed";
+            row.cells[1].className = "status Completed";
+
+            const treemapURL = `https://googlechrome.github.io/lighthouse/treemap/?load=${encodeURIComponent(`https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=desktop&category=performance&key=${apiKey}`)}`;
+            const treemapBtn = row.cells[8].querySelector("button");
+            treemapBtn.disabled = false;
+            treemapBtn.onclick = () => window.open(treemapURL, "_blank");
+
+            // Save filmstrip screenshots
+            const filmstrip = desktopData.lighthouseResult.audits["screenshot-thumbnails"].details.items.map(i => i.data);
+            localStorage.setItem(url, JSON.stringify(filmstrip));
+          } catch (err) {
+            console.error(err);
+            statusCell.textContent = "Error";
+            statusCell.className = "status Error";
+          }
+        }
+      }
+
+      async function fetchPageSpeed(url, strategy) {
+        const endpoint = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=${strategy}&category=performance&key=${apiKey}`;
+        const res = await fetch(endpoint);
+        if (!res.ok) throw new Error(`Failed for ${url}`);
+        return await res.json();
+      }
+
+      function showFilmstrip(url) {
+        const data = JSON.parse(localStorage.getItem(url) || "[]");
+        filmstripDiv.innerHTML = "<h3>Filmstrip</h3>";
+        const div = document.createElement("div");
+        div.className = "filmstrip";
+        data.forEach(img => {
+          const image = document.createElement("img");
+          image.src = img;
+          div.appendChild(image);
+        });
+        filmstripDiv.appendChild(div);
+      }
+    </script>
+  </body>
+</html>
