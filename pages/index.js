@@ -1,175 +1,164 @@
 import { useState } from "react";
-import Papa from "papaparse";
 
 export default function Home() {
-  const [urls, setUrls] = useState([]);
-  const [results, setResults] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [rows, setRows] = useState([]);
+  const [running, setRunning] = useState(false);
 
-  const handleFile = (e) => {
+  const handleFileUpload = (e) => {
     const file = e.target.files[0];
-    Papa.parse(file, {
-      header: true, // CSV has header row
-      skipEmptyLines: true,
-      complete: function (parsed) {
-        let validUrls = parsed.data
-          .map((row) => row.URLS)
-          .filter((u) => u && u.startsWith("http"));
-
-        if (validUrls.length === 0) {
-          Papa.parse(file, {
-            header: false,
-            skipEmptyLines: true,
-            complete: function (parsed2) {
-              validUrls = parsed2.data
-                .map((row) => row[0])
-                .filter((u) => u && u.startsWith("http"));
-              setUrls(validUrls);
-              setResults(validUrls.map((u) => ({ url: u, status: "Pending" })));
-            },
-          });
-        } else {
-          setUrls(validUrls);
-          setResults(validUrls.map((u) => ({ url: u, status: "Pending" })));
-        }
-      },
-    });
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const text = evt.target.result;
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      const parsed = lines.map((url) => ({
+        url: url.trim(),
+        mobileScore: "",
+        desktopScore: "",
+        mobileScreenshot: "",
+        desktopScreenshot: "",
+        status: "Pending",
+      }));
+      setRows(parsed);
+    };
+    reader.readAsText(file);
   };
 
-  const runSequential = async () => {
-    if (!urls.length) return;
-    setLoading(true);
-    const resArr = [...results];
+  const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-    for (let i = 0; i < urls.length; i++) {
-      setCurrentIndex(i);
-      resArr[i].status = "Running";
-      setResults([...resArr]);
+  const runPageSpeed = async () => {
+    if (running) return;
+    setRunning(true);
+    const apiKey = process.env.NEXT_PUBLIC_PAGESPEED_API_KEY; // set this in .env.local
+    const updatedRows = [...rows];
 
-      const rowData = { url: urls[i] };
+    for (let i = 0; i < updatedRows.length; i++) {
+      const row = updatedRows[i];
+      updatedRows[i].status = "Running...";
+      setRows([...updatedRows]);
 
-      for (const strategy of ["mobile", "desktop"]) {
-        try {
-          const response = await fetch("/api/scan", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url: urls[i], strategy }),
-          });
-          const data = await response.json();
-          rowData[strategy] = {
-            performance:
-              data?.lighthouseResult?.categories?.performance?.score ?? "-",
-            LCP:
-              data?.lighthouseResult?.audits?.["largest-contentful-paint"]
-                ?.displayValue ?? "-",
-            CLS:
-              data?.lighthouseResult?.audits?.["cumulative-layout-shift"]
-                ?.displayValue ?? "-",
-            TBT:
-              data?.lighthouseResult?.audits?.["total-blocking-time"]
-                ?.displayValue ?? "-",
-          };
-        } catch (err) {
-          rowData[strategy] = { performance: "Error", LCP: "-", CLS: "-", TBT: "-" };
-        }
+      try {
+        // MOBILE
+        const mobileRes = await fetch(
+          `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(
+            row.url
+          )}&strategy=mobile&key=${apiKey}`
+        );
+        const mobileData = await mobileRes.json();
+        const mobileScore =
+          mobileData.lighthouseResult?.categories?.performance?.score * 100 || "N/A";
+        const mobileShot =
+          mobileData.lighthouseResult?.audits["final-screenshot"]?.details?.data || "";
+
+        // DESKTOP
+        const desktopRes = await fetch(
+          `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(
+            row.url
+          )}&strategy=desktop&key=${apiKey}`
+        );
+        const desktopData = await desktopRes.json();
+        const desktopScore =
+          desktopData.lighthouseResult?.categories?.performance?.score * 100 || "N/A";
+        const desktopShot =
+          desktopData.lighthouseResult?.audits["final-screenshot"]?.details?.data || "";
+
+        updatedRows[i] = {
+          ...row,
+          mobileScore,
+          desktopScore,
+          mobileScreenshot: mobileShot,
+          desktopScreenshot: desktopShot,
+          status: "Done ✅",
+        };
+      } catch (err) {
+        updatedRows[i].status = "Error ❌";
       }
 
-      rowData.status = "Done";
-      resArr[i] = rowData;
-      setResults([...resArr]);
+      setRows([...updatedRows]);
+      await delay(3000); // wait 3s between calls to avoid quota issues
     }
 
-    setLoading(false);
+    setRunning(false);
   };
 
   return (
-    <div className="p-8 bg-gray-50 min-h-screen">
-      <h1 className="text-3xl font-bold mb-6 text-center text-blue-700">
-        PageSpeed Insights Dashboard
+    <div className="min-h-screen bg-gray-50 p-8">
+      <h1 className="text-3xl font-bold mb-6 text-center">
+        🚀 PageSpeed Analyzer Dashboard
       </h1>
 
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-4 gap-4">
+      <div className="flex justify-center mb-6 gap-4">
         <input
           type="file"
           accept=".csv"
-          onChange={handleFile}
-          className="border rounded p-2 w-full md:w-1/2"
+          onChange={handleFileUpload}
+          className="border p-2 rounded bg-white shadow"
         />
         <button
-          onClick={runSequential}
-          disabled={loading || !urls.length}
-          className={`px-6 py-2 rounded text-white font-semibold transition-colors ${
-            loading || !urls.length
+          onClick={runPageSpeed}
+          disabled={running || rows.length === 0}
+          className={`px-4 py-2 rounded text-white font-semibold shadow ${
+            running
               ? "bg-gray-400 cursor-not-allowed"
-              : "bg-blue-600 hover:bg-blue-700"
+              : "bg-green-600 hover:bg-green-700"
           }`}
         >
-          {loading ? "Running..." : "Run PageSpeed"}
+          {running ? "Running..." : "Run PageSpeed"}
         </button>
       </div>
 
-      {loading && (
-        <div className="mb-4">
-          <div className="w-full bg-gray-300 rounded h-4">
-            <div
-              className="bg-green-500 h-4 rounded transition-all"
-              style={{ width: `${((currentIndex + 1) / urls.length) * 100}%` }}
-            ></div>
-          </div>
-          <p className="mt-2 text-gray-700">
-            Processing URL {currentIndex + 1} of {urls.length}
-          </p>
-        </div>
+      <table className="min-w-full bg-white border shadow">
+        <thead className="bg-gray-100">
+          <tr>
+            <th className="border px-4 py-2">#</th>
+            <th className="border px-4 py-2">URL</th>
+            <th className="border px-4 py-2">Mobile Score</th>
+            <th className="border px-4 py-2">Desktop Score</th>
+            <th className="border px-4 py-2">Mobile Screenshot</th>
+            <th className="border px-4 py-2">Desktop Screenshot</th>
+            <th className="border px-4 py-2">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, idx) => (
+            <tr key={idx} className="text-center">
+              <td className="border px-2 py-2">{idx + 1}</td>
+              <td className="border px-2 py-2 text-blue-600 underline">
+                <a href={row.url} target="_blank" rel="noopener noreferrer">
+                  {row.url}
+                </a>
+              </td>
+              <td className="border px-2 py-2">{row.mobileScore}</td>
+              <td className="border px-2 py-2">{row.desktopScore}</td>
+              <td className="border px-2 py-2">
+                {row.mobileScreenshot && (
+                  <img
+                    src={row.mobileScreenshot}
+                    alt="Mobile"
+                    className="w-32 mx-auto rounded shadow"
+                  />
+                )}
+              </td>
+              <td className="border px-2 py-2">
+                {row.desktopScreenshot && (
+                  <img
+                    src={row.desktopScreenshot}
+                    alt="Desktop"
+                    className="w-32 mx-auto rounded shadow"
+                  />
+                )}
+              </td>
+              <td className="border px-2 py-2 font-medium">{row.status}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {rows.length === 0 && (
+        <p className="text-center mt-8 text-gray-500">
+          Upload a CSV with one column named <strong>URLS</strong> (no header required).
+        </p>
       )}
-
-      <div className="overflow-x-auto">
-        <table className="min-w-full bg-white border border-gray-300 rounded shadow">
-          <thead className="bg-blue-100">
-            <tr>
-              <th className="border p-2">URL</th>
-              <th className="border p-2">Status</th>
-              <th colSpan={4} className="border p-2">Mobile</th>
-              <th colSpan={4} className="border p-2">Desktop</th>
-            </tr>
-            <tr className="bg-blue-50">
-              <th className="border p-2"></th>
-              <th className="border p-2"></th>
-              <th className="border p-2">Performance</th>
-              <th className="border p-2">LCP</th>
-              <th className="border p-2">CLS</th>
-              <th className="border p-2">TBT</th>
-              <th className="border p-2">Performance</th>
-              <th className="border p-2">LCP</th>
-              <th className="border p-2">CLS</th>
-              <th className="border p-2">TBT</th>
-            </tr>
-          </thead>
-          <tbody>
-            {results.map((r, idx) => (
-              <tr
-                key={idx}
-                className={idx % 2 === 0 ? "bg-gray-50" : "bg-white hover:bg-gray-100"}
-              >
-                <td className="border p-2 break-words">{r.url}</td>
-                <td className="border p-2 font-semibold">
-                  {r.status ?? "Pending"}
-                </td>
-
-                <td className="border p-2">{r.mobile?.performance ?? "-"}</td>
-                <td className="border p-2">{r.mobile?.LCP ?? "-"}</td>
-                <td className="border p-2">{r.mobile?.CLS ?? "-"}</td>
-                <td className="border p-2">{r.mobile?.TBT ?? "-"}</td>
-
-                <td className="border p-2">{r.desktop?.performance ?? "-"}</td>
-                <td className="border p-2">{r.desktop?.LCP ?? "-"}</td>
-                <td className="border p-2">{r.desktop?.CLS ?? "-"}</td>
-                <td className="border p-2">{r.desktop?.TBT ?? "-"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
     </div>
   );
 }
