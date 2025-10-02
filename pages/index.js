@@ -9,15 +9,31 @@ export default function Home() {
   const handleFile = (e) => {
     const file = e.target.files[0];
     Papa.parse(file, {
-      header: true,
+      header: true, // CSV has header row
       skipEmptyLines: true,
       complete: function (parsed) {
-        // Accept multiple possible column names
-        const validUrls = parsed.data
-          .map((row) => row.url || row.URL || row.URLs || row.domain)
+        // Use 'URLS' as column header
+        let validUrls = parsed.data
+          .map((row) => row.URLS)
           .filter((u) => u && u.startsWith("http"));
-        setUrls(validUrls);
-        setResults([]);
+
+        // Fallback: if CSV has no header
+        if (validUrls.length === 0) {
+          Papa.parse(file, {
+            header: false,
+            skipEmptyLines: true,
+            complete: function (parsed2) {
+              validUrls = parsed2.data
+                .map((row) => row[0])
+                .filter((u) => u && u.startsWith("http"));
+              setUrls(validUrls);
+              setResults([]);
+            },
+          });
+        } else {
+          setUrls(validUrls);
+          setResults([]);
+        }
       },
     });
   };
