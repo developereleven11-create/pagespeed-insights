@@ -12,8 +12,9 @@ export default function Home() {
       header: true,
       skipEmptyLines: true,
       complete: function (parsed) {
+        // Accept multiple possible column names
         const validUrls = parsed.data
-          .map((row) => row.url)
+          .map((row) => row.url || row.URL || row.URLs || row.domain)
           .filter((u) => u && u.startsWith("http"));
         setUrls(validUrls);
         setResults([]);
@@ -39,10 +40,17 @@ export default function Home() {
           });
           const data = await response.json();
           rowData[strategy] = {
-            performance: data?.lighthouseResult?.categories?.performance?.score ?? "-",
-            LCP: data?.lighthouseResult?.audits?.["largest-contentful-paint"]?.displayValue ?? "-",
-            CLS: data?.lighthouseResult?.audits?.["cumulative-layout-shift"]?.displayValue ?? "-",
-            TBT: data?.lighthouseResult?.audits?.["total-blocking-time"]?.displayValue ?? "-",
+            performance:
+              data?.lighthouseResult?.categories?.performance?.score ?? "-",
+            LCP:
+              data?.lighthouseResult?.audits?.["largest-contentful-paint"]
+                ?.displayValue ?? "-",
+            CLS:
+              data?.lighthouseResult?.audits?.["cumulative-layout-shift"]
+                ?.displayValue ?? "-",
+            TBT:
+              data?.lighthouseResult?.audits?.["total-blocking-time"]
+                ?.displayValue ?? "-",
           };
         } catch (err) {
           rowData[strategy] = { performance: "Error", LCP: "-", CLS: "-", TBT: "-" };
@@ -70,7 +78,9 @@ export default function Home() {
       <button
         onClick={runSequential}
         disabled={loading || !urls.length}
-        className={`mb-4 px-4 py-2 rounded text-white ${loading ? "bg-gray-400" : "bg-blue-500"}`}
+        className={`mb-4 px-4 py-2 rounded text-white ${
+          loading || !urls.length ? "bg-gray-400 cursor-not-allowed" : "bg-blue-500"
+        }`}
       >
         {loading ? "Running..." : "Run PageSpeed"}
       </button>
