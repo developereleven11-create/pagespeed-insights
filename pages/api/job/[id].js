@@ -20,9 +20,11 @@ export default async function handler(req, res) {
     }
     const job = jobRes.rows[0];
 
-    // fetch results
+    // fetch results (force jsonb → text to avoid node-pg quirks)
     const resultsRes = await client.query(
-      `SELECT id, url, status, desktop, mobile
+      `SELECT id, url, status,
+              desktop::text as desktop,
+              mobile::text as mobile
        FROM job_results
        WHERE job_id=$1
        ORDER BY id ASC
@@ -30,28 +32,11 @@ export default async function handler(req, res) {
       [id]
     );
 
-    // always parse JSON into objects
-    const results = resultsRes.rows.map((r) => {
-      let desktop, mobile;
-      try {
-        desktop =
-          typeof r.desktop === "string" ? JSON.parse(r.desktop) : r.desktop;
-      } catch {
-        desktop = {};
-      }
-      try {
-        mobile =
-          typeof r.mobile === "string" ? JSON.parse(r.mobile) : r.mobile;
-      } catch {
-        mobile = {};
-      }
-
-      return {
-        ...r,
-        desktop,
-        mobile,
-      };
-    });
+    const results = resultsRes.rows.map((r) => ({
+      ...r,
+      desktop: r.desktop ? JSON.parse(r.desktop) : {},
+      mobile: r.mobile ? JSON.parse(r.mobile) : {},
+    }));
 
     res.json({
       job,
