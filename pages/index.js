@@ -112,20 +112,34 @@ export default function Dashboard() {
           <h2 className="text-xl font-bold">Jobs</h2>
           <input type="file" accept=".csv" onChange={handleFile} />
         </div>
-        <ul>
-          {jobs.map((job) => (
-            <li
-              key={job.id}
-              onClick={() => selectJob(job.id)}
-              className={`p-3 cursor-pointer ${
-                selectedJob?.id === job.id ? "bg-blue-100" : "hover:bg-gray-100"
-              }`}
-            >
-              <div className="font-medium truncate">{job.name}</div>
-              <div className="text-xs text-gray-500">{job.status}</div>
-            </li>
-          ))}
-        </ul>
+    <ul>
+  {jobs.map((job) => (
+    <li
+      key={job.id}
+      onClick={() => selectJob(job.id)}
+      className={`p-3 cursor-pointer ${
+        selectedJob?.id === job.id ? "bg-blue-100" : "hover:bg-gray-100"
+      }`}
+    >
+      <div className="font-medium truncate">{job.name}</div>
+      <div className="text-xs text-gray-500">
+        {job.done}/{job.total} done
+        {job.error > 0 && ` • ${job.error} errors`}
+      </div>
+      <div className="w-full bg-gray-200 rounded h-2 mt-1">
+        <div
+          className="bg-blue-600 h-2 rounded"
+          style={{ width: `${job.progress}%` }}
+        />
+      </div>
+      {job.etaMinutes !== null && (
+        <div className="text-[10px] text-gray-400 mt-1">
+          ETA: {job.etaMinutes} min
+        </div>
+      )}
+    </li>
+  ))}
+</ul>
       </div>
 
       {/* Main Dashboard */}
