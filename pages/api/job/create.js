@@ -1,21 +1,32 @@
-import { sql } from "@vercel/postgres";
+import pkg from "pg";
+const { Pool } = pkg;
+
+const pool = new Pool({
+  connectionString: process.env.POSTGRES_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
   const { name, urls } = req.body; // urls = array of domains
 
-  const { rows } = await sql`
-    INSERT INTO jobs (name) VALUES (${name})
-    RETURNING id
-  `;
-  const jobId = rows[0].id;
+  const client = await pool.connect();
+  try {
+    const jobInsert = await client.query(
+      "INSERT INTO jobs (name) VALUES ($1) RETURNING id",
+      [name]
+    );
+    const jobId = jobInsert.rows[0].id;
 
-  for (const u of urls) {
-    await sql`
-      INSERT INTO job_results (job_id, url)
-      VALUES (${jobId}, ${u})
-    `;
+    for (const u of urls) {
+      await client.query(
+        "INSERT INTO job_results (job_id, url) VALUES ($1, $2)",
+        [jobId, u]
+      );
+    }
+
+    res.json({ ok: true, jobId });
+  } finally {
+    client.release();
   }
-
-  res.json({ ok: true, jobId });
 }
