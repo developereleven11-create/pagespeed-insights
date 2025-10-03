@@ -1,214 +1,356 @@
-import { useState } from "react";
+// pages/index.js
+import { useEffect, useState } from "react";
 
-export default function Home() {
-  const [file, setFile] = useState(null);
-  const [data, setData] = useState([]);
-  const [loading, setLoading] = useState(false);
+function parseCSVText(text) {
+  // tolerant parse: supports header `URLs` or single-column lists
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return [];
+  // check header
+  const header = lines[0].split(",").map(s=>s.trim().toLowerCase());
+  let urls = [];
+  const urlHeaderIndex = header.findIndex(h => ["urls","url","website","domain"].includes(h));
+  if (urlHeaderIndex >= 0) {
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(",");
+      const val = (cols[urlHeaderIndex]||"").trim();
+      if (val) urls.push(val);
+    }
+  } else {
+    // no header: treat each line as URL
+    for (let i = 0; i < lines.length; i++) {
+      const v = lines[i].replace(/['"]+/g, "").trim();
+      if (v) urls.push(v);
+    }
+  }
+  // normalize: ensure protocol
+  urls = urls.map(u => {
+    if (!/^https?:\/\//i.test(u)) return `https://${u}`;
+    return u;
+  });
+  // unique preserve order
+  return [...new Set(urls)];
+}
 
-  const handleFileUpload = (e) => {
-    const uploadedFile = e.target.files[0];
-    setFile(uploadedFile);
+export default function Dashboard() {
+  const [urls, setUrls] = useState([]);
+  const [results, setResults] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("psi_results_v1") || "{}");
+    } catch (e) { return {}; }
+  });
+  const [selected, setSelected] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState({ done:0, total:0 });
 
+  useEffect(() => {
+    localStorage.setItem("psi_results_v1", JSON.stringify(results));
+  }, [results]);
+
+  // CSV upload
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target.result;
-      const rows = text.split("\n").filter(Boolean);
-      const headers = rows[0].split(",").map((h) => h.trim());
-      const urlIndex = headers.findIndex((h) => h.toLowerCase() === "urls");
-      if (urlIndex === -1) {
-        alert("CSV must have a column named 'URLs'");
-        return;
-      }
-      const urls = rows.slice(1).map((r) => {
-        const cols = r.split(",");
-        return {
-          url: cols[urlIndex].trim(),
-          status: "Pending",
-        };
-      });
-      setData(urls);
+    reader.onload = (ev) => {
+      const parsed = parseCSVText(ev.target.result);
+      setUrls(parsed);
+      setProgress({ done: 0, total: parsed.length * 2 }); // mobile+desktop
     };
-    reader.readAsText(uploadedFile);
+    reader.readAsText(file);
   };
 
-  const runPageSpeed = async () => {
-    if (!data.length) return alert("Upload a CSV first!");
-    setLoading(true);
+  // helper to POST to our api/scan
+  async function callScan(url, strategy) {
+    const resp = await fetch("/api/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, strategy })
+    });
+    if (!resp.ok) {
+      const txt = await resp.text();
+      throw new Error(`API error ${resp.status}: ${txt}`);
+    }
+    const json = await resp.json();
+    if (!json.ok) throw new Error(json.message || "PSI returned ok:false");
+    return json;
+  }
 
-    const updated = [...data];
-    for (let i = 0; i < updated.length; i++) {
-      const item = updated[i];
-      updated[i].status = "Running...";
-      setData([...updated]);
+  const runAllSequential = async () => {
+    if (!urls.length) return alert("Upload CSV first");
+    setRunning(true);
+    let doneCount = 0;
+    const totalSteps = urls.length * 2;
+    setProgress({ done: 0, total: totalSteps });
+
+    const newResults = { ...results };
+
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      // skip already finished both strategies
+      if (newResults[url] && newResults[url].desktop && newResults[url].mobile) {
+        doneCount += 2;
+        setProgress({ done: doneCount, total: totalSteps });
+        continue;
+      }
+      // set pending/running
+      newResults[url] = { ...(newResults[url]||{}), status: "Running" };
+      setResults({ ...newResults });
 
       try {
-        const desktopRes = await fetch(
-          `/api/scan?url=${encodeURIComponent(item.url)}&strategy=desktop`
-        ).then((res) => res.json());
-        const mobileRes = await fetch(
-          `/api/scan?url=${encodeURIComponent(item.url)}&strategy=mobile`
-        ).then((res) => res.json());
+        // mobile
+        if (!newResults[url].mobile) {
+          const mobile = await callScan(url, "mobile");
+          newResults[url].mobile = {
+            metrics: mobile.metrics,
+            filmstrip: mobile.filmstrip,
+            firstVisibleFrameIndex: mobile.firstVisibleFrameIndex,
+            lighthouse: mobile.lighthouse
+          };
+        }
+        doneCount++;
+        setProgress({ done: doneCount, total: totalSteps });
 
-        const getMetric = (res, key) =>
-          res?.lighthouseResult?.audits?.[key]?.displayValue || "N/A";
-        const getScore = (res) =>
-          Math.round((res?.lighthouseResult?.categories?.performance?.score || 0) * 100);
-
-        updated[i] = {
-          ...item,
-          status: "Completed",
-          desktop: {
-            score: getScore(desktopRes),
-            lcp: getMetric(desktopRes, "largest-contentful-paint"),
-            fcp: getMetric(desktopRes, "first-contentful-paint"),
-            tbt: getMetric(desktopRes, "total-blocking-time"),
-            cls: getMetric(desktopRes, "cumulative-layout-shift"),
-          },
-          mobile: {
-            score: getScore(mobileRes),
-            lcp: getMetric(mobileRes, "largest-contentful-paint"),
-            fcp: getMetric(mobileRes, "first-contentful-paint"),
-            tbt: getMetric(mobileRes, "total-blocking-time"),
-            cls: getMetric(mobileRes, "cumulative-layout-shift"),
-          },
-        };
+        // desktop
+        if (!newResults[url].desktop) {
+          await new Promise(r => setTimeout(r, 1200)); // small throttle
+          const desktop = await callScan(url, "desktop");
+          newResults[url].desktop = {
+            metrics: desktop.metrics,
+            filmstrip: desktop.filmstrip,
+            firstVisibleFrameIndex: desktop.firstVisibleFrameIndex,
+            lighthouse: desktop.lighthouse
+          };
+        }
+        doneCount++;
+        newResults[url].status = "Done";
+        setResults({ ...newResults });
+        setProgress({ done: doneCount, total: totalSteps });
       } catch (err) {
-        updated[i].status = "Error";
+        console.error("Scan error for", url, err);
+        newResults[url].status = "Error";
+        setResults({ ...newResults });
+        doneCount += 2; // mark steps to avoid hanging progress
+        setProgress({ done: doneCount, total: totalSteps });
       }
 
-      setData([...updated]); // live update row
+      // small delay so quotas are kind to the API
+      await new Promise(r => setTimeout(r, 1500));
     }
 
-    setLoading(false);
+    setRunning(false);
   };
 
-  const getTreemapLink = (url, strategy) => {
-    const apiUrl = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(
-      url
-    )}&strategy=${strategy}&category=performance`;
-    const treemapUrl = `https://googlechrome.github.io/lighthouse/treemap/?load=${encodeURIComponent(
-      apiUrl
-    )}`;
-    return treemapUrl;
+  // UI helpers
+  const downloadJSON = (obj, filename) => {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadCSV = () => {
+    // flatten results to CSV rows
+    const rows = [["url","desktop_score","desktop_LCP","desktop_FCP","desktop_TBT","desktop_CLS","mobile_score","mobile_LCP","mobile_FCP","mobile_TBT","mobile_CLS","status"]];
+    for (const u of urls) {
+      const r = results[u] || {};
+      rows.push([
+        u,
+        r.desktop?.metrics?.score ?? "",
+        r.desktop?.metrics?.LCP ?? "",
+        r.desktop?.metrics?.FCP ?? "",
+        r.desktop?.metrics?.TBT ?? "",
+        r.desktop?.metrics?.CLS ?? "",
+        r.mobile?.metrics?.score ?? "",
+        r.mobile?.metrics?.LCP ?? "",
+        r.mobile?.metrics?.FCP ?? "",
+        r.mobile?.metrics?.TBT ?? "",
+        r.mobile?.metrics?.CLS ?? "",
+        r.status ?? ""
+      ]);
+    }
+    const csv = rows.map(r=>r.map(cell => `"${String(cell).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "pagespeed_results.csv"; a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="flex min-h-screen bg-gray-100">
+    <div style={{ display: "flex", height: "100vh", fontFamily: "Inter,system-ui,Segoe UI,Roboto,Arial" }}>
       {/* Sidebar */}
-      <aside className="w-72 bg-white shadow-lg p-4 overflow-y-auto border-r border-gray-200">
-        <h2 className="text-xl font-semibold mb-4">Domains</h2>
-        {data.length === 0 && (
-          <p className="text-gray-500 text-sm">Upload a CSV to see domains</p>
-        )}
-        <ul>
-          {data.map((item, idx) => (
-            <li key={idx} className="mb-3">
-              <p className="text-sm font-medium truncate">{item.url}</p>
-              {item.status === "Completed" && (
-                <div className="flex gap-2 mt-1">
-                  <a
-                    href={getTreemapLink(item.url, "desktop")}
-                    target="_blank"
-                    className="text-xs text-blue-600 hover:underline"
-                  >
-                    Desktop Treemap
-                  </a>
-                  <a
-                    href={getTreemapLink(item.url, "mobile")}
-                    target="_blank"
-                    className="text-xs text-green-600 hover:underline"
-                  >
-                    Mobile Treemap
-                  </a>
-                </div>
-              )}
-              <span
-                className={`text-xs ${
-                  item.status === "Completed"
-                    ? "text-green-600"
-                    : item.status === "Error"
-                    ? "text-red-500"
-                    : item.status === "Running..."
-                    ? "text-yellow-600"
-                    : "text-gray-500"
-                }`}
-              >
-                {item.status}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </aside>
-
-      {/* Main Dashboard */}
-      <main className="flex-1 p-8">
-        <div className="max-w-6xl mx-auto">
-          <h1 className="text-3xl font-bold mb-6">
-            PageSpeed Insights Dashboard
-          </h1>
-
-          <div className="bg-white p-6 rounded-lg shadow mb-8">
-            <input
-              type="file"
-              accept=".csv"
-              onChange={handleFileUpload}
-              className="mb-4"
-            />
-            <button
-              onClick={runPageSpeed}
-              disabled={loading}
-              className={`px-6 py-2 rounded-md text-white ${
-                loading ? "bg-gray-400" : "bg-blue-600 hover:bg-blue-700"
-              }`}
-            >
-              {loading ? "Running..." : "Run PageSpeed"}
-            </button>
-          </div>
-
-          <div className="bg-white rounded-lg shadow overflow-x-auto">
-            <table className="min-w-full text-sm text-left">
-              <thead className="bg-gray-200">
-                <tr>
-                  <th className="p-3">URL</th>
-                  <th className="p-3 text-center">Status</th>
-                  <th className="p-3 text-center">Desktop Score</th>
-                  <th className="p-3">LCP</th>
-                  <th className="p-3">FCP</th>
-                  <th className="p-3">TBT</th>
-                  <th className="p-3">CLS</th>
-                  <th className="p-3 text-center">Mobile Score</th>
-                  <th className="p-3">LCP</th>
-                  <th className="p-3">FCP</th>
-                  <th className="p-3">TBT</th>
-                  <th className="p-3">CLS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.map((item, idx) => (
-                  <tr key={idx} className="border-b hover:bg-gray-50">
-                    <td className="p-3 truncate max-w-xs">{item.url}</td>
-                    <td className="p-3 text-center">{item.status}</td>
-                    <td className="p-3 text-center font-bold">
-                      {item.desktop?.score ?? "-"}
-                    </td>
-                    <td className="p-3">{item.desktop?.lcp ?? "-"}</td>
-                    <td className="p-3">{item.desktop?.fcp ?? "-"}</td>
-                    <td className="p-3">{item.desktop?.tbt ?? "-"}</td>
-                    <td className="p-3">{item.desktop?.cls ?? "-"}</td>
-                    <td className="p-3 text-center font-bold">
-                      {item.mobile?.score ?? "-"}
-                    </td>
-                    <td className="p-3">{item.mobile?.lcp ?? "-"}</td>
-                    <td className="p-3">{item.mobile?.fcp ?? "-"}</td>
-                    <td className="p-3">{item.mobile?.tbt ?? "-"}</td>
-                    <td className="p-3">{item.mobile?.cls ?? "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      <div style={{ width: 340, borderRight: "1px solid #e6e6e6", padding: 20, overflowY: "auto", background:"#fff" }}>
+        <h3 style={{ margin:0, marginBottom:12 }}>Domains</h3>
+        <input type="file" accept=".csv" onChange={handleFile} style={{ marginBottom:12 }} />
+        <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+          <button onClick={runAllSequential} disabled={running || !urls.length}>
+            {running ? `Running ${progress.done}/${progress.total}` : "Run (mobile+desktop)"}
+          </button>
+          <button onClick={downloadCSV} disabled={!urls.length}>Download CSV</button>
         </div>
-      </main>
+
+        <div style={{ fontSize:12, color:"#666", marginBottom:10 }}>
+          Click domain to view filmstrip & metrics. Results persist in this browser (localStorage).
+        </div>
+
+        <div>
+          {urls.map((u) => {
+            const r = results[u] || {};
+            const status = r.status || (r.desktop || r.mobile ? "Partial" : "Pending");
+            return (
+              <div key={u} style={{ padding:8, borderBottom:"1px solid #f0f0f0", cursor:"pointer" }} onClick={() => setSelected(u)}>
+                <div style={{ fontSize:13, color:"#111", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{u}</div>
+                <div style={{ fontSize:12, color: status === "Done" ? "#059669" : status === "Running" ? "#d97706" : "#6b7280" }}>{status}</div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ marginTop:16 }}>
+          <h4 style={{ margin: "8px 0" }}>Summary</h4>
+          <div style={{ fontSize:13, color:"#333" }}>Total URLs: {urls.length}</div>
+          <div style={{ fontSize:13, color:"#333" }}>Completed: {Object.values(results).filter(r=>r.desktop && r.mobile).length}</div>
+        </div>
+      </div>
+
+      {/* Main */}
+      <div style={{ flex:1, padding:20, overflow:"auto", background:"#f7fafc" }}>
+        <h2 style={{ marginTop:0 }}>PageSpeed Dashboard</h2>
+
+        {/* big table */}
+        <div style={{ background:"#fff", borderRadius:8, boxShadow:"0 1px 2px rgba(0,0,0,0.04)", overflowX:"auto" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse" }}>
+            <thead style={{ background:"#f3f4f6" }}>
+              <tr>
+                <th style={{ padding:10, borderBottom:"1px solid #eee", textAlign:"left" }}>URL</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>Status</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>Desktop Score</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>LCP</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>FCP</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>TBT</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>CLS</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>Mobile Score</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>LCP</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>FCP</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>TBT</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>CLS</th>
+                <th style={{ padding:10, borderBottom:"1px solid #eee" }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {urls.map(u => {
+                const r = results[u] || {};
+                return (
+                  <tr key={u} style={{ borderBottom:"1px solid #f3f3f3" }}>
+                    <td style={{ padding:10, maxWidth:350, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{u}</td>
+                    <td style={{ padding:10 }}>{r.status || "Pending"}</td>
+                    <td style={{ padding:10 }}>{r.desktop?.metrics?.score ?? "-"}</td>
+                    <td style={{ padding:10 }}>{r.desktop?.metrics?.LCP ?? "-"}</td>
+                    <td style={{ padding:10 }}>{r.desktop?.metrics?.FCP ?? "-"}</td>
+                    <td style={{ padding:10 }}>{r.desktop?.metrics?.TBT ?? "-"}</td>
+                    <td style={{ padding:10 }}>{r.desktop?.metrics?.CLS ?? "-"}</td>
+                    <td style={{ padding:10 }}>{r.mobile?.metrics?.score ?? "-"}</td>
+                    <td style={{ padding:10 }}>{r.mobile?.metrics?.LCP ?? "-"}</td>
+                    <td style={{ padding:10 }}>{r.mobile?.metrics?.FCP ?? "-"}</td>
+                    <td style={{ padding:10 }}>{r.mobile?.metrics?.TBT ?? "-"}</td>
+                    <td style={{ padding:10 }}>{r.mobile?.metrics?.CLS ?? "-"}</td>
+                    <td style={{ padding:10 }}>
+                      <div style={{ display:"flex", gap:8 }}>
+                        <button onClick={() => selected === u ? setSelected(null) : setSelected(u)}>Open</button>
+                        {r.desktop?.lighthouse && <button onClick={() => downloadJSON(r.desktop.lighthouse, `${u.replace(/[:\/]/g,"_")}-desktop-lh.json`)}>Download LH</button>}
+                        {r.mobile?.lighthouse && <button onClick={() => downloadJSON(r.mobile.lighthouse, `${u.replace(/[:\/]/g,"_")}-mobile-lh.json`)}>Download LH</button>}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* selected domain details */}
+        <div style={{ marginTop:20 }}>
+          {!selected ? <div style={{ color:"#6b7280" }}>Click a domain on the left to view filmstrip and detailed metrics.</div> : (
+            (() => {
+              const r = results[selected];
+              if (!r) return <div>No results yet for {selected}</div>;
+              return (
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 320px", gap:20 }}>
+                  <div style={{ background:"#fff", padding:16, borderRadius:8 }}>
+                    <h3 style={{ marginTop:0 }}>Detailed metrics — {selected}</h3>
+                    <div style={{ display:"flex", gap:12 }}>
+                      <div style={{ flex:1 }}>
+                        <h4>Desktop</h4>
+                        <div>Performance Score: <strong>{r.desktop?.metrics?.score ?? "-"}</strong></div>
+                        <div>LCP: {r.desktop?.metrics?.LCP ?? "-"}</div>
+                        <div>FCP: {r.desktop?.metrics?.FCP ?? "-"}</div>
+                        <div>TBT: {r.desktop?.metrics?.TBT ?? "-"}</div>
+                        <div>CLS: {r.desktop?.metrics?.CLS ?? "-"}</div>
+                        <div style={{ marginTop:8 }}>
+                          <strong>First visible frame index:</strong> {r.desktop?.firstVisibleFrameIndex ?? "N/A"}
+                        </div>
+                      </div>
+                      <div style={{ flex:1 }}>
+                        <h4>Mobile</h4>
+                        <div>Performance Score: <strong>{r.mobile?.metrics?.score ?? "-"}</strong></div>
+                        <div>LCP: {r.mobile?.metrics?.LCP ?? "-"}</div>
+                        <div>FCP: {r.mobile?.metrics?.FCP ?? "-"}</div>
+                        <div>TBT: {r.mobile?.metrics?.TBT ?? "-"}</div>
+                        <div>CLS: {r.mobile?.metrics?.CLS ?? "-"}</div>
+                        <div style={{ marginTop:8 }}>
+                          <strong>First visible frame index:</strong> {r.mobile?.firstVisibleFrameIndex ?? "N/A"}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop:16 }}>
+                      <h4>Desktop filmstrip</h4>
+                      <div style={{ display:"flex", gap:8, overflowX:"auto", paddingTop:8 }}>
+                        {r.desktop?.filmstrip?.map((f, idx) => (
+                          <div key={idx} style={{ textAlign:"center" }}>
+                            <img src={f.data} alt={`f${idx}`} style={{ width:120, height:"auto", border: idx === r.desktop.firstVisibleFrameIndex ? "3px solid #16a34a" : "1px solid #ddd", borderRadius:6 }} />
+                            <div style={{ fontSize:11 }}>{idx}</div>
+                          </div>
+                        )) || <div style={{ color:"#6b7280" }}>No filmstrip</div>}
+                      </div>
+
+                      <h4 style={{ marginTop:12 }}>Mobile filmstrip</h4>
+                      <div style={{ display:"flex", gap:8, overflowX:"auto", paddingTop:8 }}>
+                        {r.mobile?.filmstrip?.map((f, idx) => (
+                          <div key={idx} style={{ textAlign:"center" }}>
+                            <img src={f.data} alt={`f${idx}`} style={{ width:90, height:"auto", border: idx === r.mobile.firstVisibleFrameIndex ? "3px solid #16a34a" : "1px solid #ddd", borderRadius:6 }} />
+                            <div style={{ fontSize:11 }}>{idx}</div>
+                          </div>
+                        )) || <div style={{ color:"#6b7280" }}>No filmstrip</div>}
+                      </div>
+                    </div>
+                  </div>
+
+                  <aside style={{ background:"#fff", padding:16, borderRadius:8 }}>
+                    <h4 style={{ marginTop:0 }}>Actions</h4>
+                    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                      {r.desktop?.lighthouse && <button onClick={() => downloadJSON(r.desktop.lighthouse, `${selected.replace(/[:\/]/g,"_")}-desktop-lh.json`)}>Download Desktop LH JSON (for Treemap)</button>}
+                      {r.mobile?.lighthouse && <button onClick={() => downloadJSON(r.mobile.lighthouse, `${selected.replace(/[:\/]/g,"_")}-mobile-lh.json`)}>Download Mobile LH JSON</button>}
+                      <button onClick={() => {
+                        // download all filmstrip frames as one ZIP-like (simple approach: create multiple links)
+                        const farr = r.desktop?.filmstrip || r.mobile?.filmstrip || [];
+                        farr.forEach((f, idx) => {
+                          const a = document.createElement("a");
+                          a.href = f.data;
+                          a.download = `${selected.replace(/[:\/]/g,"_")}-frame-${idx}.png`;
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                        });
+                      }}>Download filmstrip images (desktop)</button>
+                    </div>
+                  </aside>
+                </div>
+              );
+            })()
+          )}
+        </div>
+
+      </div>
     </div>
   );
 }
