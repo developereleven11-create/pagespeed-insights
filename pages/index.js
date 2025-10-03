@@ -25,6 +25,14 @@ export default function Dashboard() {
     loadJobs();
   }, []);
 
+  // Auto-refresh jobs every 10s
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadJobs();
+    }, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
   async function loadJobs() {
     try {
       const j = await api("/api/jobs");
@@ -45,6 +53,16 @@ export default function Dashboard() {
     } catch (err) {
       console.error(err);
     }
+  }
+
+  // Cancel a job
+  async function cancelJob(id) {
+    await api("/api/job/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId: id }),
+    });
+    await loadJobs();
   }
 
   // CSV parser
@@ -107,39 +125,59 @@ export default function Dashboard() {
   return (
     <div className="flex h-screen bg-gray-100">
       {/* Sidebar */}
-      <div className="w-64 bg-white border-r overflow-y-auto">
+      <div className="w-72 bg-white border-r overflow-y-auto">
         <div className="p-4 border-b">
           <h2 className="text-xl font-bold">Jobs</h2>
           <input type="file" accept=".csv" onChange={handleFile} />
         </div>
-    <ul>
-  {jobs.map((job) => (
-    <li
-      key={job.id}
-      onClick={() => selectJob(job.id)}
-      className={`p-3 cursor-pointer ${
-        selectedJob?.id === job.id ? "bg-blue-100" : "hover:bg-gray-100"
-      }`}
-    >
-      <div className="font-medium truncate">{job.name}</div>
-      <div className="text-xs text-gray-500">
-        {job.done}/{job.total} done
-        {job.error > 0 && ` • ${job.error} errors`}
-      </div>
-      <div className="w-full bg-gray-200 rounded h-2 mt-1">
-        <div
-          className="bg-blue-600 h-2 rounded"
-          style={{ width: `${job.progress}%` }}
-        />
-      </div>
-      {job.etaMinutes !== null && (
-        <div className="text-[10px] text-gray-400 mt-1">
-          ETA: {job.etaMinutes} min
+
+        <div>
+          {jobs.map((job) => (
+            <div
+              key={job.id}
+              onClick={() => selectJob(job.id)}
+              className={`p-3 cursor-pointer border-b ${
+                selectedJob?.id === job.id ? "bg-blue-100" : "hover:bg-gray-50"
+              }`}
+            >
+              <div className="flex justify-between items-center">
+                <div className="font-medium truncate">{job.name}</div>
+                {job.status !== "done" && job.status !== "cancelled" && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      cancelJob(job.id);
+                    }}
+                    className="text-xs text-red-600 hover:text-red-800"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+              <div className="text-xs text-gray-500">
+                {job.done ?? 0}/{job.total ?? 0} done
+                {job.error > 0 && ` • ${job.error} errors`}
+              </div>
+              <div className="w-full bg-gray-200 rounded h-2 mt-1">
+                <div
+                  className="bg-blue-600 h-2 rounded"
+                  style={{ width: `${job.progress ?? 0}%` }}
+                />
+              </div>
+              {job.etaMinutes && (
+                <div className="text-[10px] text-gray-400 mt-1">
+                  ETA:{" "}
+                  {job.etaMinutes === "Calculating..."
+                    ? "Calculating..."
+                    : `${job.etaMinutes} min`}
+                </div>
+              )}
+              {job.status === "cancelled" && (
+                <div className="text-[10px] text-red-500 mt-1">Cancelled</div>
+              )}
+            </div>
+          ))}
         </div>
-      )}
-    </li>
-  ))}
-</ul>
       </div>
 
       {/* Main Dashboard */}
@@ -148,17 +186,19 @@ export default function Dashboard() {
           <>
             <div className="flex justify-between items-center mb-6">
               <h1 className="text-2xl font-bold">{selectedJob.name}</h1>
-              <button
-                disabled={running}
-                onClick={() => runJob(selectedJob.id)}
-                className={`px-4 py-2 rounded text-white ${
-                  running
-                    ? "bg-gray-400"
-                    : "bg-blue-600 hover:bg-blue-700"
-                }`}
-              >
-                {running ? "Running..." : "Run Job"}
-              </button>
+              {selectedJob.status !== "cancelled" && (
+                <button
+                  disabled={running}
+                  onClick={() => runJob(selectedJob.id)}
+                  className={`px-4 py-2 rounded text-white ${
+                    running
+                      ? "bg-gray-400"
+                      : "bg-blue-600 hover:bg-blue-700"
+                  }`}
+                >
+                  {running ? "Running..." : "Run Job"}
+                </button>
+              )}
             </div>
 
             {/* Results grid */}
@@ -175,6 +215,8 @@ export default function Dashboard() {
                         ? "bg-green-100 text-green-700"
                         : r.status === "pending"
                         ? "bg-gray-100 text-gray-700"
+                        : r.status === "cancelled"
+                        ? "bg-red-100 text-red-700"
                         : "bg-yellow-100 text-yellow-700"
                     }`}
                   >
@@ -204,7 +246,8 @@ export default function Dashboard() {
                     <div className="text-sm text-gray-700">
                       <p>
                         <span className="font-semibold">Desktop:</span>{" "}
-                        LCP {r.desktop.lcp}, FCP {r.desktop.fcp}, TBT {r.desktop.tbt}, CLS {r.desktop.cls}
+                        LCP {r.desktop.lcp}, FCP {r.desktop.fcp}, TBT{" "}
+                        {r.desktop.tbt}, CLS {r.desktop.cls}
                       </p>
                     </div>
                   )}
@@ -212,7 +255,8 @@ export default function Dashboard() {
                     <div className="text-sm text-gray-700 mt-1">
                       <p>
                         <span className="font-semibold">Mobile:</span>{" "}
-                        LCP {r.mobile.lcp}, FCP {r.mobile.fcp}, TBT {r.mobile.tbt}, CLS {r.mobile.cls}
+                        LCP {r.mobile.lcp}, FCP {r.mobile.fcp}, TBT{" "}
+                        {r.mobile.tbt}, CLS {r.mobile.cls}
                       </p>
                     </div>
                   )}
