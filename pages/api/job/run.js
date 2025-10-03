@@ -12,7 +12,7 @@ export default async function handler(req, res) {
 
   const client = await pool.connect();
   try {
-    // Pick 1 pending URL
+    // Pick one pending URL
     const { rows } = await client.query(
       "SELECT * FROM job_results WHERE job_id = $1 AND status = 'pending' LIMIT 1",
       [jobId]
@@ -32,7 +32,25 @@ export default async function handler(req, res) {
         url
       )}&strategy=${strategy}&category=performance&key=${API_KEY}`;
       const r = await fetch(endpoint);
-      return await r.json();
+      const json = await r.json();
+
+      const audits = json.lighthouseResult?.audits || {};
+      const categories = json.lighthouseResult?.categories || {};
+
+      return {
+        score: categories.performance
+          ? Math.round(categories.performance.score * 100)
+          : null,
+        lcp: audits["largest-contentful-paint"]?.displayValue || null,
+        fcp: audits["first-contentful-paint"]?.displayValue || null,
+        tbt: audits["total-blocking-time"]?.displayValue || null,
+        cls: audits["cumulative-layout-shift"]?.displayValue || null,
+        filmstrip:
+          audits["screenshot-thumbnails"]?.details?.items?.map((i) => ({
+            data: i.data,
+            timing: i.timing
+          })) || []
+      };
     }
 
     const desktop = await runPSI("desktop");
@@ -43,7 +61,10 @@ export default async function handler(req, res) {
       [JSON.stringify(desktop), JSON.stringify(mobile), row.id]
     );
 
-    res.json({ ok: true, url });
+    res.json({ ok: true, url, desktop, mobile });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to run PSI" });
   } finally {
     client.release();
   }
