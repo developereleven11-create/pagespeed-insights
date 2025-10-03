@@ -12,8 +12,19 @@ export default async function handler(req, res) {
 
   try {
     const job = await client.query("SELECT * FROM jobs WHERE id = $1", [id]);
-    const results = await client.query("SELECT * FROM job_results WHERE job_id = $1", [id]);
+    if (!job.rows.length) {
+      return res.status(404).json({ ok: false, error: "Job not found" });
+    }
+
+    const results = await client.query(
+      "SELECT * FROM job_results WHERE job_id = $1 ORDER BY id ASC",
+      [id]
+    );
+
     res.json({ job: job.rows[0], results: results.rows });
+  } catch (err) {
+    console.error("Error fetching job:", err);
+    res.status(500).json({ ok: false, error: err.message });
   } finally {
     client.release();
   }
