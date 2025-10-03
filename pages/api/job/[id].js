@@ -22,22 +22,36 @@ export default async function handler(req, res) {
 
     // fetch results
     const resultsRes = await client.query(
-      `SELECT id, url, status,
-              COALESCE(desktop, '{}'::jsonb) as desktop,
-              COALESCE(mobile, '{}'::jsonb) as mobile
+      `SELECT id, url, status, desktop, mobile
        FROM job_results
        WHERE job_id=$1
        ORDER BY id ASC
-       LIMIT 200`, // keep it light
+       LIMIT 200`,
       [id]
     );
 
-    // parse JSON (Neon returns jsonb as string in node-pg)
-    const results = resultsRes.rows.map((r) => ({
-      ...r,
-      desktop: typeof r.desktop === "string" ? JSON.parse(r.desktop) : r.desktop,
-      mobile: typeof r.mobile === "string" ? JSON.parse(r.mobile) : r.mobile,
-    }));
+    // always parse JSON into objects
+    const results = resultsRes.rows.map((r) => {
+      let desktop, mobile;
+      try {
+        desktop =
+          typeof r.desktop === "string" ? JSON.parse(r.desktop) : r.desktop;
+      } catch {
+        desktop = {};
+      }
+      try {
+        mobile =
+          typeof r.mobile === "string" ? JSON.parse(r.mobile) : r.mobile;
+      } catch {
+        mobile = {};
+      }
+
+      return {
+        ...r,
+        desktop,
+        mobile,
+      };
+    });
 
     res.json({
       job,
