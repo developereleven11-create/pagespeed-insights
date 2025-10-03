@@ -6,13 +6,21 @@ const api = async (url, opts = {}) => {
   return res.json();
 };
 
+const scoreColor = (score) => {
+  if (score === null || score === undefined) return "bg-gray-300 text-gray-800";
+  if (score >= 90) return "bg-green-500 text-white";
+  if (score >= 50) return "bg-yellow-500 text-white";
+  return "bg-red-500 text-white";
+};
+
 export default function Dashboard() {
   const [jobs, setJobs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
   const [results, setResults] = useState([]);
   const [running, setRunning] = useState(false);
+  const [selectedUrl, setSelectedUrl] = useState(null);
 
-  // Load all jobs on mount
+  // Load jobs on mount
   useEffect(() => {
     loadJobs();
   }, []);
@@ -87,14 +95,18 @@ export default function Dashboard() {
         done = true;
       }
       await selectJob(id);
-      await new Promise((r) => setTimeout(r, 2000)); // small delay
+      await new Promise((r) => setTimeout(r, 1500));
     }
     setRunning(false);
   };
 
+  const selectedResult = selectedUrl
+    ? results.find((r) => r.url === selectedUrl)
+    : null;
+
   return (
     <div className="flex h-screen bg-gray-100">
-      {/* Sidebar: list of jobs */}
+      {/* Sidebar */}
       <div className="w-64 bg-white border-r overflow-y-auto">
         <div className="p-4 border-b">
           <h2 className="text-xl font-bold">Jobs</h2>
@@ -135,97 +147,117 @@ export default function Dashboard() {
               </button>
             </div>
 
-            {/* Grid of results */}
+            {/* Results grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {results.map((r) => {
-                const desktopScore = r.desktop?.lighthouseResult?.categories?.performance?.score
-                  ? Math.round(r.desktop.lighthouseResult.categories.performance.score * 100)
-                  : null;
-                const mobileScore = r.mobile?.lighthouseResult?.categories?.performance?.score
-                  ? Math.round(r.mobile.lighthouseResult.categories.performance.score * 100)
-                  : null;
-
-                return (
-                  <div
-                    key={r.id}
-                    className="bg-white p-4 rounded shadow flex flex-col"
+              {results.map((r) => (
+                <div
+                  key={r.id}
+                  className="bg-white p-4 rounded shadow flex flex-col"
+                >
+                  <h2 className="font-semibold truncate">{r.url}</h2>
+                  <span
+                    className={`inline-block px-2 py-1 text-xs rounded mt-1 ${
+                      r.status === "done"
+                        ? "bg-green-100 text-green-700"
+                        : r.status === "pending"
+                        ? "bg-gray-100 text-gray-700"
+                        : "bg-yellow-100 text-yellow-700"
+                    }`}
                   >
-                    <h2 className="font-semibold truncate">{r.url}</h2>
-                    <span
-                      className={`inline-block px-2 py-1 text-xs rounded mt-1 ${
-                        r.status === "done"
-                          ? "bg-green-100 text-green-700"
-                          : r.status === "running"
-                          ? "bg-yellow-100 text-yellow-700"
-                          : r.status === "error"
-                          ? "bg-red-100 text-red-700"
-                          : "bg-gray-100 text-gray-700"
-                      }`}
+                    {r.status}
+                  </span>
+
+                  {/* Scores */}
+                  <div className="flex gap-4 my-4">
+                    <div
+                      className={`w-12 h-12 flex items-center justify-center rounded-full text-lg font-bold ${scoreColor(
+                        r.desktop?.score
+                      )}`}
                     >
-                      {r.status}
-                    </span>
-
-                    <div className="flex gap-4 my-4">
-                      <div
-                        className={`w-12 h-12 flex items-center justify-center rounded-full text-lg font-bold ${
-                          desktopScore >= 90
-                            ? "bg-green-500 text-white"
-                            : desktopScore >= 50
-                            ? "bg-yellow-500 text-white"
-                            : "bg-red-500 text-white"
-                        }`}
-                      >
-                        {desktopScore ?? "--"}
-                      </div>
-                      <div
-                        className={`w-12 h-12 flex items-center justify-center rounded-full text-lg font-bold ${
-                          mobileScore >= 90
-                            ? "bg-green-500 text-white"
-                            : mobileScore >= 50
-                            ? "bg-yellow-500 text-white"
-                            : "bg-red-500 text-white"
-                        }`}
-                      >
-                        {mobileScore ?? "--"}
-                      </div>
+                      {r.desktop?.score ?? "--"}
                     </div>
-
-                    {/* Show quick metrics */}
-                    {r.desktop && r.desktop.lighthouseResult?.audits && (
-                      <div className="text-sm text-gray-700">
-                        <p>
-                          <span className="font-semibold">Desktop:</span>{" "}
-                          LCP {r.desktop.lighthouseResult.audits["largest-contentful-paint"].displayValue},{" "}
-                          FCP {r.desktop.lighthouseResult.audits["first-contentful-paint"].displayValue}
-                        </p>
-                        <p>
-                          TBT {r.desktop.lighthouseResult.audits["total-blocking-time"].displayValue},{" "}
-                          CLS {r.desktop.lighthouseResult.audits["cumulative-layout-shift"].displayValue}
-                        </p>
-                      </div>
-                    )}
-                    {r.mobile && r.mobile.lighthouseResult?.audits && (
-                      <div className="text-sm text-gray-700 mt-1">
-                        <p>
-                          <span className="font-semibold">Mobile:</span>{" "}
-                          LCP {r.mobile.lighthouseResult.audits["largest-contentful-paint"].displayValue},{" "}
-                          FCP {r.mobile.lighthouseResult.audits["first-contentful-paint"].displayValue}
-                        </p>
-                        <p>
-                          TBT {r.mobile.lighthouseResult.audits["total-blocking-time"].displayValue},{" "}
-                          CLS {r.mobile.lighthouseResult.audits["cumulative-layout-shift"].displayValue}
-                        </p>
-                      </div>
-                    )}
+                    <div
+                      className={`w-12 h-12 flex items-center justify-center rounded-full text-lg font-bold ${scoreColor(
+                        r.mobile?.score
+                      )}`}
+                    >
+                      {r.mobile?.score ?? "--"}
+                    </div>
                   </div>
-                );
-              })}
+
+                  {/* Metrics */}
+                  {r.desktop && (
+                    <div className="text-sm text-gray-700">
+                      <p>
+                        <span className="font-semibold">Desktop:</span>{" "}
+                        LCP {r.desktop.lcp}, FCP {r.desktop.fcp}, TBT {r.desktop.tbt}, CLS {r.desktop.cls}
+                      </p>
+                    </div>
+                  )}
+                  {r.mobile && (
+                    <div className="text-sm text-gray-700 mt-1">
+                      <p>
+                        <span className="font-semibold">Mobile:</span>{" "}
+                        LCP {r.mobile.lcp}, FCP {r.mobile.fcp}, TBT {r.mobile.tbt}, CLS {r.mobile.cls}
+                      </p>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => setSelectedUrl(r.url)}
+                    className="mt-3 px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 text-sm"
+                  >
+                    View Filmstrip
+                  </button>
+                </div>
+              ))}
             </div>
           </>
         ) : (
           <p className="text-gray-500">Select a job from the left</p>
         )}
       </div>
+
+      {/* Filmstrip Drawer */}
+      {selectedResult && (
+        <div className="fixed top-0 right-0 w-full sm:w-[480px] h-full bg-white shadow-lg overflow-y-auto transition-all">
+          <div className="p-4 border-b flex justify-between items-center">
+            <h2 className="text-lg font-bold">{selectedResult.url}</h2>
+            <button
+              className="text-gray-500 hover:text-gray-800"
+              onClick={() => setSelectedUrl(null)}
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="p-4">
+            <h3 className="font-semibold mb-2">Desktop Filmstrip</h3>
+            <div className="flex gap-2 overflow-x-auto">
+              {selectedResult.desktop?.filmstrip?.map((f, i) => (
+                <img
+                  key={i}
+                  src={f.data}
+                  alt={`frame ${i}`}
+                  className="w-32 border border-gray-300"
+                />
+              ))}
+            </div>
+
+            <h3 className="font-semibold mt-4 mb-2">Mobile Filmstrip</h3>
+            <div className="flex gap-2 overflow-x-auto">
+              {selectedResult.mobile?.filmstrip?.map((f, i) => (
+                <img
+                  key={i}
+                  src={f.data}
+                  alt={`frame ${i}`}
+                  className="w-24 border border-gray-300"
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
