@@ -1,22 +1,21 @@
-name: PageSpeed Runner (Neon)
+name: PageSpeed Runner
 
 on:
   schedule:
-    # every 5 minutes
-    - cron: '*/5 * * * *'
-  workflow_dispatch: {}
+    - cron: "*/5 * * * *"  # every 5 minutes
+  workflow_dispatch:        # allow manual trigger from Actions tab
 
 jobs:
-  run-psi:
+  run-runner:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v3
         with:
-          node-version: '18'
+          node-version: 18
 
       - name: Install dependencies
         run: npm install
@@ -25,6 +24,7 @@ jobs:
         env:
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          BATCH_SIZE: ${{ secrets.BATCH_SIZE }}   # optional
-          MAX_FRAMES: ${{ secrets.MAX_FRAMES }}   # optional
+          BATCH_SIZE: 5
+          DELAY_BETWEEN_URLS: 5000
+          MAX_FRAMES: 8
         run: node scripts/runner.js
