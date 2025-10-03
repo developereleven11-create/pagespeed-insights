@@ -11,6 +11,7 @@
     "next": "13.5.6",
     "react": "18.2.0",
     "react-dom": "18.2.0",
+     "pg": "^8.11.5"
     "papaparse": "5.4.1",
     "swr": "2.2.0"
   },
@@ -18,8 +19,5 @@
     "autoprefixer": "10.4.14",
     "postcss": "8.4.23",
     "tailwindcss": "3.4.7"
-  },
-  "dependencies": {
-  "pg": "^8.11.5"
   }
 }
