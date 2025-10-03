@@ -147,14 +147,27 @@ export default function Dashboard() {
                   {mobileScore ?? "--"}
                 </div>
               </div>
-              {r?.desktop?.metrics && (
-                <div className="text-sm text-gray-700">
-                  <p>LCP: {r.desktop.metrics.LCP}</p>
-                  <p>FCP: {r.desktop.metrics.FCP}</p>
-                  <p>TBT: {r.desktop.metrics.TBT}</p>
-                  <p>CLS: {r.desktop.metrics.CLS}</p>
-                </div>
-              )}
+              <div className="text-sm text-gray-700 mt-2">
+  {r?.desktop?.metrics && (
+    <div>
+      <p className="font-semibold">Desktop</p>
+      <p>LCP: {r.desktop.metrics.LCP}</p>
+      <p>FCP: {r.desktop.metrics.FCP}</p>
+      <p>TBT: {r.desktop.metrics.TBT}</p>
+      <p>CLS: {r.desktop.metrics.CLS}</p>
+    </div>
+  )}
+  {r?.mobile?.metrics && (
+    <div className="mt-2">
+      <p className="font-semibold">Mobile</p>
+      <p>LCP: {r.mobile.metrics.LCP}</p>
+      <p>FCP: {r.mobile.metrics.FCP}</p>
+      <p>TBT: {r.mobile.metrics.TBT}</p>
+      <p>CLS: {r.mobile.metrics.CLS}</p>
+    </div>
+  )}
+</div>
+
               <div className="flex gap-2 mt-4">
                 <button
                   className="px-3 py-1 text-sm bg-gray-200 rounded hover:bg-gray-300"
