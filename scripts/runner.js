@@ -1,20 +1,20 @@
 // scripts/runner.js
-// PageSpeed runner with retries, exponential backoff, longer timeout
+// PageSpeed runner with retries + backoff + error recycling
 
 const { Pool } = require("pg");
 
 const POSTGRES_URL = process.env.POSTGRES_URL;
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 
-// Configurable knobs
 const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "5", 10);
-const MAX_FRAMES = parseInt(process.env.MAX_FRAMES || "8", 10);
-const FETCH_TIMEOUT_MS = parseInt(process.env.FETCH_TIMEOUT_MS || "75000", 10); // 75s
-const DELAY_BETWEEN_URLS = parseInt(process.env.DELAY_BETWEEN_URLS || "5000", 10);
-const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || "3", 10);
+const MAX_FRAMES = parseInt(process.env.MAX_FRAMES || "5", 10); // fewer frames = less DB
+const FETCH_TIMEOUT_MS = parseInt(process.env.FETCH_TIMEOUT_MS || "60000", 10); // 60s
+const DELAY_BETWEEN_URLS = parseInt(process.env.DELAY_BETWEEN_URLS || "3000", 10); // 3s
+const MAX_RETRIES = 3;
+const RETRY_COOLDOWN_HOURS = 6;
 
 if (!POSTGRES_URL || !GOOGLE_API_KEY) {
-  console.error("❌ Missing POSTGRES_URL or GOOGLE_API_KEY env vars");
+  console.error("❌ Missing POSTGRES_URL or GOOGLE_API_KEY");
   process.exit(1);
 }
 
@@ -29,43 +29,51 @@ async function resetStuck(client) {
     `UPDATE job_results
      SET status = 'pending'
      WHERE status = 'running'
-     AND completed_at IS NULL
-     AND created_at < NOW() - INTERVAL '30 minutes'
+       AND completed_at IS NULL
+       AND created_at < NOW() - INTERVAL '30 minutes'
      RETURNING id`
   );
   if (res.rowCount > 0) {
-    console.log(`🔄 Reset ${res.rowCount} stuck rows back to pending`);
+    console.log(`🔄 Reset ${res.rowCount} stuck rows`);
   }
 }
 
-// Pick batch atomically
+// Atomically pick batch of pending rows
 async function pickBatch(client, batchSize) {
   await client.query("BEGIN");
+
   const selectRes = await client.query(
-    `SELECT id, job_id, url
+    `SELECT id, job_id, url, retries
      FROM job_results
      WHERE status = 'pending'
+       AND (retries < $2 OR (status='pending' AND updated_at < NOW() - INTERVAL '${RETRY_COOLDOWN_HOURS} hours'))
      ORDER BY id ASC
      FOR UPDATE SKIP LOCKED
      LIMIT $1`,
-    [batchSize]
+    [batchSize, MAX_RETRIES]
   );
+
   const rows = selectRes.rows;
   if (!rows.length) {
     await client.query("COMMIT");
     return [];
   }
+
   const ids = rows.map((r) => r.id);
   const jobIds = [...new Set(rows.map((r) => r.job_id))];
 
   await client.query(
-    `UPDATE job_results SET status = 'running' WHERE id = ANY($1::int[])`,
+    `UPDATE job_results
+     SET status = 'running', updated_at = NOW()
+     WHERE id = ANY($1::int[])`,
     [ids]
   );
+
   await client.query(
     `UPDATE jobs SET status='running' WHERE id = ANY($1::int[])`,
     [jobIds]
   );
+
   await client.query("COMMIT");
   return rows;
 }
@@ -119,7 +127,7 @@ async function runOne(url) {
   const mobileRes = await fetchWithTimeout(endpoint("mobile"));
   const mobileJson = await mobileRes.json();
 
-  await new Promise((r) => setTimeout(r, 1000)); // polite wait
+  await new Promise((r) => setTimeout(r, 1000));
 
   const desktopRes = await fetchWithTimeout(endpoint("desktop"));
   const desktopJson = await desktopRes.json();
@@ -128,21 +136,6 @@ async function runOne(url) {
     mobile: extractCompact(mobileJson),
     desktop: extractCompact(desktopJson),
   };
-}
-
-// Retry wrapper with exponential backoff
-async function runOneWithRetry(url, retries = MAX_RETRIES) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await runOne(url);
-    } catch (err) {
-      console.error(`⚠️ Attempt ${attempt} failed for ${url}:`, err.message);
-      if (attempt === retries) throw err;
-      const wait = attempt * 5000; // backoff: 5s, 10s, 15s...
-      console.log(`🔁 Retrying ${url} in ${wait / 1000}s...`);
-      await new Promise((r) => setTimeout(r, wait));
-    }
-  }
 }
 
 async function markJobDoneIfComplete(client, jobId) {
@@ -158,7 +151,7 @@ async function markJobDoneIfComplete(client, jobId) {
 
 (async function main() {
   console.log(
-    `🚀 PSI Runner starting — batch=${BATCH_SIZE}, delay=${DELAY_BETWEEN_URLS}ms, timeout=${FETCH_TIMEOUT_MS}ms, retries=${MAX_RETRIES}`
+    `🚀 PSI Runner — batch=${BATCH_SIZE}, delay=${DELAY_BETWEEN_URLS}ms, maxFrames=${MAX_FRAMES}`
   );
   const client = await pool.connect();
   try {
@@ -166,18 +159,18 @@ async function markJobDoneIfComplete(client, jobId) {
 
     const rows = await pickBatch(client, BATCH_SIZE);
     if (!rows.length) {
-      console.log("📭 No pending rows found — exiting.");
+      console.log("📭 No pending rows — exiting.");
       return;
     }
 
     console.log(`📦 Picked ${rows.length} URLs`);
     for (const row of rows) {
-      const { id, url, job_id } = row;
+      const { id, url, job_id, retries } = row;
       console.log(`⏳ Processing [${id}] ${url}`);
       const start = Date.now();
 
       try {
-        const { desktop, mobile } = await runOneWithRetry(url);
+        const { desktop, mobile } = await runOne(url);
         const duration_ms = Date.now() - start;
 
         await pool.query(
@@ -186,30 +179,47 @@ async function markJobDoneIfComplete(client, jobId) {
                desktop=$1::jsonb,
                mobile=$2::jsonb,
                completed_at = NOW(),
-               duration_ms = $3
+               updated_at = NOW(),
+               duration_ms = $3,
+               error_message = NULL
            WHERE id = $4`,
           [JSON.stringify(desktop), JSON.stringify(mobile), duration_ms, id]
         );
 
         console.log(
-          `✅ Done [${id}] in ${(duration_ms / 1000).toFixed(
-            1
-          )}s (score D:${desktop.score} / M:${mobile.score})`
+          `✅ Done [${id}] in ${(duration_ms / 1000).toFixed(1)}s (score D:${desktop.score} / M:${mobile.score})`
         );
 
         await markJobDoneIfComplete(pool, job_id);
       } catch (err) {
         console.error(`❌ Error [${id}] ${url}:`, err.message || err);
-        await pool.query(
-          `UPDATE job_results
-           SET status='error',
-               completed_at = NOW()
-           WHERE id = $1`,
-          [id]
-        );
+
+        if (retries + 1 < MAX_RETRIES) {
+          await pool.query(
+            `UPDATE job_results
+             SET status='pending',
+                 retries = retries + 1,
+                 updated_at = NOW(),
+                 error_message = $2
+             WHERE id = $1`,
+            [id, err.message || "unknown"]
+          );
+          console.log(`↩️  Will retry [${id}] (retry ${retries + 1}) after cooldown`);
+        } else {
+          await pool.query(
+            `UPDATE job_results
+             SET status='error',
+                 retries = retries + 1,
+                 completed_at = NOW(),
+                 updated_at = NOW(),
+                 error_message = $2
+             WHERE id = $1`,
+            [id, err.message || "unknown"]
+          );
+          console.log(`❌ Permanently failed [${id}] after ${MAX_RETRIES} retries`);
+        }
       }
 
-      // throttle between URLs
       await new Promise((r) => setTimeout(r, DELAY_BETWEEN_URLS));
     }
 
