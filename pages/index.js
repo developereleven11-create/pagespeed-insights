@@ -20,12 +20,17 @@ export default function Dashboard() {
   const [running, setRunning] = useState(false);
   const [selectedUrl, setSelectedUrl] = useState(null);
 
+  // pagination state
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const limit = 200;
+
   // Load jobs on mount
   useEffect(() => {
     loadJobs();
   }, []);
 
-  // Auto-refresh jobs every 10s
+  // Auto-refresh jobs list every 10s
   useEffect(() => {
     const interval = setInterval(() => {
       loadJobs();
@@ -47,11 +52,28 @@ export default function Dashboard() {
 
   async function selectJob(id) {
     try {
-      const data = await api(`/api/job/${id}`);
+      setOffset(0);
+      const data = await api(`/api/job/${id}?offset=0&limit=${limit}`);
       setSelectedJob(data.job);
       setResults(data.results);
+      setHasMore(data.pagination?.hasMore);
     } catch (err) {
       console.error(err);
+    }
+  }
+
+  async function loadMore() {
+    if (!selectedJob) return;
+    const newOffset = offset + limit;
+    try {
+      const data = await api(
+        `/api/job/${selectedJob.id}?offset=${newOffset}&limit=${limit}`
+      );
+      setResults((prev) => [...prev, ...data.results]);
+      setOffset(newOffset);
+      setHasMore(data.pagination?.hasMore);
+    } catch (err) {
+      console.error("Failed to load more results", err);
     }
   }
 
@@ -97,25 +119,6 @@ export default function Dashboard() {
       await selectJob(resp.jobId);
     };
     reader.readAsText(file);
-  };
-
-  // Run job step-by-step
-  const runJob = async (id) => {
-    setRunning(true);
-    let done = false;
-    while (!done) {
-      const resp = await api("/api/job/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: id }),
-      });
-      if (resp.done) {
-        done = true;
-      }
-      await selectJob(id);
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-    setRunning(false);
   };
 
   const selectedResult = selectedUrl
@@ -164,14 +167,6 @@ export default function Dashboard() {
                   style={{ width: `${job.progress ?? 0}%` }}
                 />
               </div>
-              {job.etaMinutes && (
-                <div className="text-[10px] text-gray-400 mt-1">
-                  ETA:{" "}
-                  {job.etaMinutes === "Calculating..."
-                    ? "Calculating..."
-                    : `${job.etaMinutes} min`}
-                </div>
-              )}
               {job.status === "cancelled" && (
                 <div className="text-[10px] text-red-500 mt-1">Cancelled</div>
               )}
@@ -186,19 +181,6 @@ export default function Dashboard() {
           <>
             <div className="flex justify-between items-center mb-6">
               <h1 className="text-2xl font-bold">{selectedJob.name}</h1>
-              {selectedJob.status !== "cancelled" && (
-                <button
-                  disabled={running}
-                  onClick={() => runJob(selectedJob.id)}
-                  className={`px-4 py-2 rounded text-white ${
-                    running
-                      ? "bg-gray-400"
-                      : "bg-blue-600 hover:bg-blue-700"
-                  }`}
-                >
-                  {running ? "Running..." : "Run Job"}
-                </button>
-              )}
             </div>
 
             {/* Results grid */}
@@ -270,6 +252,18 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
+
+            {/* Load More */}
+            {hasMore && (
+              <div className="flex justify-center mt-6">
+                <button
+                  onClick={loadMore}
+                  className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                >
+                  Load More
+                </button>
+              </div>
+            )}
           </>
         ) : (
           <p className="text-gray-500">Select a job from the left</p>
