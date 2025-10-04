@@ -1,233 +1,195 @@
-// scripts/runner.js
-// PageSpeed runner with retries + backoff + error recycling
+// /scripts/runner.js
+/* Node runner for PageSpeed Insights jobs
+   - Picks pending job_results in batches
+   - Calls Google PSI for mobile+desktop
+   - Retries aborted/failure with exponential backoff
+   - Updates job_results with desktop/mobile JSON and status
+*/
 
-const { Pool } = require("pg");
-
-const POSTGRES_URL = process.env.POSTGRES_URL;
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
-
-const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "5", 10);
-const MAX_FRAMES = parseInt(process.env.MAX_FRAMES || "5", 10); // fewer frames = less DB
-const FETCH_TIMEOUT_MS = parseInt(process.env.FETCH_TIMEOUT_MS || "60000", 10); // 60s
-const DELAY_BETWEEN_URLS = parseInt(process.env.DELAY_BETWEEN_URLS || "3000", 10); // 3s
-const MAX_RETRIES = 3;
-const RETRY_COOLDOWN_HOURS = 6;
-
-if (!POSTGRES_URL || !GOOGLE_API_KEY) {
-  console.error("❌ Missing POSTGRES_URL or GOOGLE_API_KEY");
-  process.exit(1);
-}
+import { Pool } from "pg";
+import fetch from "node-fetch"; // if your environment has global fetch you can remove this
+import AbortController from "abort-controller";
 
 const pool = new Pool({
-  connectionString: POSTGRES_URL,
-  ssl: { rejectUnauthorized: false },
+  connectionString: process.env.POSTGRES_URL,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
 
-// Reset stuck rows
-async function resetStuck(client) {
-  const res = await client.query(
-    `UPDATE job_results
-     SET status = 'pending'
-     WHERE status = 'running'
-       AND completed_at IS NULL
-       AND created_at < NOW() - INTERVAL '30 minutes'
-     RETURNING id`
-  );
-  if (res.rowCount > 0) {
-    console.log(`🔄 Reset ${res.rowCount} stuck rows`);
-  }
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "5", 10);
+const FETCH_TIMEOUT_MS = parseInt(process.env.FETCH_TIMEOUT_MS || "45000", 10);
+const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || "4", 10);
+const BASE_DELAY_MS = 1000;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-// Atomically pick batch of pending rows
-async function pickBatch(client, batchSize) {
-  await client.query("BEGIN");
-
-  const selectRes = await client.query(
-    `SELECT id, job_id, url, retries
-     FROM job_results
-     WHERE status = 'pending'
-       AND (retries < $2 OR (status='pending' AND updated_at < NOW() - INTERVAL '${RETRY_COOLDOWN_HOURS} hours'))
-     ORDER BY id ASC
-     FOR UPDATE SKIP LOCKED
-     LIMIT $1`,
-    [batchSize, MAX_RETRIES]
-  );
-
-  const rows = selectRes.rows;
-  if (!rows.length) {
-    await client.query("COMMIT");
-    return [];
-  }
-
-  const ids = rows.map((r) => r.id);
-  const jobIds = [...new Set(rows.map((r) => r.job_id))];
-
-  await client.query(
-    `UPDATE job_results
-     SET status = 'running', updated_at = NOW()
-     WHERE id = ANY($1::int[])`,
-    [ids]
-  );
-
-  await client.query(
-    `UPDATE jobs SET status='running' WHERE id = ANY($1::int[])`,
-    [jobIds]
-  );
-
-  await client.query("COMMIT");
-  return rows;
-}
-
-function extractCompact(json) {
-  const audits = json?.lighthouseResult?.audits || {};
-  const categories = json?.lighthouseResult?.categories || {};
-  const score = categories.performance
-    ? Math.round(categories.performance.score * 100)
-    : null;
-
-  const items =
-    audits["screenshot-thumbnails"]?.details?.items ||
-    audits["filmstrip"]?.details?.items ||
-    [];
-
-  const frames = items.slice(0, MAX_FRAMES).map((it) => ({
-    timing: it.timing ?? it.timestamp ?? null,
-    data: it.data || it,
-  }));
-
-  return {
-    score,
-    lcp: audits["largest-contentful-paint"]?.displayValue ?? null,
-    fcp: audits["first-contentful-paint"]?.displayValue ?? null,
-    tbt: audits["total-blocking-time"]?.displayValue ?? null,
-    cls: audits["cumulative-layout-shift"]?.displayValue ?? null,
-    filmstrip: frames,
-  };
-}
-
-async function fetchWithTimeout(url, timeout = FETCH_TIMEOUT_MS) {
+async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  const id = setTimeout(() => controller.abort(), timeout);
   try {
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(id);
     return res;
-  } catch (err) {
-    clearTimeout(timer);
-    throw err;
+  } finally {
+    clearTimeout(id);
   }
 }
 
-async function runOne(url) {
-  const endpoint = (strategy) =>
-    `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(
-      url
-    )}&strategy=${strategy}&category=performance&key=${GOOGLE_API_KEY}`;
+async function callPSI(urlToTest, strategy = "mobile") {
+  const encoded = encodeURIComponent(urlToTest);
+  const url = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encoded}&strategy=${strategy}&key=${GOOGLE_API_KEY}`;
+  let attempt = 0;
+  let lastError = null;
 
-  const mobileRes = await fetchWithTimeout(endpoint("mobile"));
-  const mobileJson = await mobileRes.json();
-
-  await new Promise((r) => setTimeout(r, 1000));
-
-  const desktopRes = await fetchWithTimeout(endpoint("desktop"));
-  const desktopJson = await desktopRes.json();
-
-  return {
-    mobile: extractCompact(mobileJson),
-    desktop: extractCompact(desktopJson),
-  };
-}
-
-async function markJobDoneIfComplete(client, jobId) {
-  const res = await client.query(
-    `SELECT 1 FROM job_results WHERE job_id = $1 AND status NOT IN ('done','error') LIMIT 1`,
-    [jobId]
-  );
-  if (res.rowCount === 0) {
-    await client.query(`UPDATE jobs SET status='done' WHERE id=$1`, [jobId]);
-    console.log(`✅ Job ${jobId} marked as done`);
+  while (attempt <= MAX_RETRIES) {
+    try {
+      attempt++;
+      const resp = await fetchWithTimeout(url);
+      if (!resp.ok) {
+        const body = await resp.text();
+        throw new Error(`PSI HTTP ${resp.status}: ${body}`);
+      }
+      const json = await resp.json();
+      return json;
+    } catch (err) {
+      lastError = err;
+      const isAbort = err.name === "AbortError" || err.message?.toLowerCase()?.includes("aborted");
+      const backoff = BASE_DELAY_MS * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 300);
+      console.warn(`PSI call failed (attempt ${attempt}) for ${urlToTest} (${strategy}):`, err.message || err);
+      if (attempt > MAX_RETRIES) break;
+      await sleep(backoff);
+    }
   }
+  throw lastError || new Error("Unknown PSI error");
 }
 
-(async function main() {
-  console.log(
-    `🚀 PSI Runner — batch=${BATCH_SIZE}, delay=${DELAY_BETWEEN_URLS}ms, maxFrames=${MAX_FRAMES}`
-  );
+async function pickPendingBatch(batchSize) {
+  // Select pending job_results with FOR UPDATE SKIP LOCKED to allow concurrent runners safely (if DB supports it)
   const client = await pool.connect();
   try {
-    await resetStuck(client);
-
-    const rows = await pickBatch(client, BATCH_SIZE);
+    await client.query("BEGIN");
+    const selectQuery = `
+      SELECT jr.id, jr.job_id, jr.url
+      FROM job_results jr
+      WHERE jr.status = 'pending'
+      ORDER BY jr.created_at ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT $1
+    `;
+    const sel = await client.query(selectQuery, [batchSize]);
+    const rows = sel.rows;
     if (!rows.length) {
-      console.log("📭 No pending rows — exiting.");
-      return;
+      await client.query("COMMIT");
+      return [];
     }
 
-    console.log(`📦 Picked ${rows.length} URLs`);
-    for (const row of rows) {
-      const { id, url, job_id, retries } = row;
-      console.log(`⏳ Processing [${id}] ${url}`);
-      const start = Date.now();
+    // mark them as 'in_progress' so we don't pick them again
+    const ids = rows.map((r) => r.id);
+    await client.query(
+      `UPDATE job_results SET status='in_progress', started_at = NOW() WHERE id = ANY($1::int[])`,
+      [ids]
+    );
 
-      try {
-        const { desktop, mobile } = await runOne(url);
-        const duration_ms = Date.now() - start;
-
-        await pool.query(
-          `UPDATE job_results
-           SET status='done',
-               desktop=$1::jsonb,
-               mobile=$2::jsonb,
-               completed_at = NOW(),
-               updated_at = NOW(),
-               duration_ms = $3,
-               error_message = NULL
-           WHERE id = $4`,
-          [JSON.stringify(desktop), JSON.stringify(mobile), duration_ms, id]
-        );
-
-        console.log(
-          `✅ Done [${id}] in ${(duration_ms / 1000).toFixed(1)}s (score D:${desktop.score} / M:${mobile.score})`
-        );
-
-        await markJobDoneIfComplete(pool, job_id);
-      } catch (err) {
-        console.error(`❌ Error [${id}] ${url}:`, err.message || err);
-
-        if (retries + 1 < MAX_RETRIES) {
-          await pool.query(
-            `UPDATE job_results
-             SET status='pending',
-                 retries = retries + 1,
-                 updated_at = NOW(),
-                 error_message = $2
-             WHERE id = $1`,
-            [id, err.message || "unknown"]
-          );
-          console.log(`↩️  Will retry [${id}] (retry ${retries + 1}) after cooldown`);
-        } else {
-          await pool.query(
-            `UPDATE job_results
-             SET status='error',
-                 retries = retries + 1,
-                 completed_at = NOW(),
-                 updated_at = NOW(),
-                 error_message = $2
-             WHERE id = $1`,
-            [id, err.message || "unknown"]
-          );
-          console.log(`❌ Permanently failed [${id}] after ${MAX_RETRIES} retries`);
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, DELAY_BETWEEN_URLS));
-    }
-
-    console.log("🎉 Batch finished");
+    await client.query("COMMIT");
+    return rows;
   } catch (err) {
-    console.error("Runner error:", err);
+    await client.query("ROLLBACK");
+    throw err;
   } finally {
     client.release();
-    await pool.end();
   }
-})();
+}
+
+async function processItem(item) {
+  const { id, url } = item;
+  const start = Date.now();
+  try {
+    // call both strategies in parallel but with their own retry logic
+    const [mobile, desktop] = await Promise.allSettled([
+      callPSI(url, "mobile"),
+      callPSI(url, "desktop"),
+    ]);
+
+    const desktopResult = desktop.status === "fulfilled" ? desktop.value : { error: String(desktop.reason) };
+    const mobileResult = mobile.status === "fulfilled" ? mobile.value : { error: String(mobile.reason) };
+
+    const duration_ms = Date.now() - start;
+    const status = (desktop.status === "fulfilled" || mobile.status === "fulfilled") ? "completed" : "failed";
+
+    const updateQuery = `
+      UPDATE job_results
+      SET
+        desktop = $1,
+        mobile = $2,
+        status = $3,
+        completed_at = NOW(),
+        duration_ms = $4
+      WHERE id = $5
+      RETURNING *
+    `;
+    const vals = [desktopResult, mobileResult, status, duration_ms, id];
+    await pool.query(updateQuery, vals);
+    console.log(`${status === "completed" ? "✅" : "❌"} Result [${id}] ${url} -> ${status} in ${duration_ms}ms`);
+  } catch (err) {
+    console.error("processItem error:", err);
+    // mark failed with error message (truncate to avoid huge error fields)
+    const msg = String(err.message || err).slice(0, 2000);
+    await pool.query(
+      `UPDATE job_results SET status='failed', completed_at = NOW(), duration_ms = $1, desktop = desktop, mobile = mobile WHERE id = $2`,
+      [Math.max(0, Date.now() - start), id]
+    ).catch((e) => console.error("Error marking failed:", e));
+  }
+}
+
+async function mainOnce() {
+  try {
+    const batch = await pickPendingBatch(BATCH_SIZE);
+    if (!batch.length) {
+      console.log("No pending items found.");
+      return false;
+    }
+    console.log(`Processing batch of ${batch.length} items...`);
+    // Process concurrently but limit concurrency to batch size
+    await Promise.all(batch.map(processItem));
+    return true;
+  } catch (err) {
+    console.error("Runner mainOnce error:", err);
+    return false;
+  }
+}
+
+async function mainLoop() {
+  try {
+    // One-shot runner; CI / cron should call this script repeatedly.
+    // We'll loop a few times to finish queued batches in a single run (safe).
+    let runs = 0;
+    while (runs < 10) {
+      const didWork = await mainOnce();
+      if (!didWork) break;
+      runs++;
+      // small pause between batches to avoid rate-limits
+      await sleep(1000);
+    }
+    console.log("Runner finished.");
+    process.exit(0);
+  } catch (err) {
+    console.error("Runner fatal error:", err);
+    process.exit(1);
+  }
+}
+
+if (require.main === module) {
+  if (!process.env.POSTGRES_URL) {
+    console.error("Missing POSTGRES_URL env var");
+    process.exit(1);
+  }
+  if (!process.env.GOOGLE_API_KEY) {
+    console.error("Missing GOOGLE_API_KEY env var");
+    process.exit(1);
+  }
+  mainLoop();
+}
+
+export { mainLoop };
