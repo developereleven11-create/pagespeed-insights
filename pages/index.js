@@ -28,7 +28,7 @@ export default function Dashboard() {
     loadJobs();
   }, []);
 
-  // Auto-refresh jobs list every 15s
+  // Auto-refresh jobs every 15s
   useEffect(() => {
     const interval = setInterval(() => {
       if (selectedJob) selectJob(selectedJob.id, offset);
@@ -117,6 +117,18 @@ export default function Dashboard() {
     reader.readAsText(file);
   };
 
+  // Helper to summarize error reasons
+  function summarizeErrors(results) {
+    const summary = {};
+    results.forEach((r) => {
+      if (r.status === "error" && r.error_message) {
+        const key = r.error_message.split(" ")[0]; // short reason
+        summary[key] = (summary[key] || 0) + 1;
+      }
+    });
+    return summary;
+  }
+
   const selectedResult = selectedUrl
     ? results.find((r) => r.url === selectedUrl)
     : null;
@@ -124,47 +136,62 @@ export default function Dashboard() {
   return (
     <div className="flex h-screen bg-gray-100">
       {/* Sidebar */}
-      <div className="w-72 bg-white border-r overflow-y-auto">
+      <div className="w-80 bg-white border-r overflow-y-auto">
         <div className="p-4 border-b">
           <h2 className="text-xl font-bold">Jobs</h2>
           <input type="file" accept=".csv" onChange={handleFile} />
         </div>
 
         <div>
-          {jobs.map((job) => (
-            <div
-              key={job.id}
-              onClick={() => selectJob(job.id, 0)}
-              className={`p-3 cursor-pointer border-b ${
-                selectedJob?.id === job.id ? "bg-blue-100" : "hover:bg-gray-50"
-              }`}
-            >
-              <div className="flex justify-between items-center">
-                <div className="font-medium truncate">{job.name}</div>
-                {job.status !== "done" && job.status !== "cancelled" && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      cancelJob(job.id);
-                    }}
-                    className="text-xs text-red-600 hover:text-red-800"
-                  >
-                    Cancel
-                  </button>
+          {jobs.map((job) => {
+            // build error summary for each job
+            const summary = summarizeErrors(results);
+            return (
+              <div
+                key={job.id}
+                onClick={() => selectJob(job.id, 0)}
+                className={`p-3 cursor-pointer border-b ${
+                  selectedJob?.id === job.id ? "bg-blue-100" : "hover:bg-gray-50"
+                }`}
+              >
+                <div className="flex justify-between items-center">
+                  <div className="font-medium truncate">{job.name}</div>
+                  {job.status !== "done" && job.status !== "cancelled" && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        cancelJob(job.id);
+                      }}
+                      className="text-xs text-red-600 hover:text-red-800"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+                <div className="text-xs text-gray-500">
+                  {job.done ?? 0}/{job.total ?? 0} done
+                  {job.error > 0 && ` • ${job.error} errors`}
+                </div>
+                <div className="w-full bg-gray-200 rounded h-2 mt-1">
+                  <div
+                    className="bg-blue-600 h-2 rounded"
+                    style={{ width: `${job.progress ?? 0}%` }}
+                  />
+                </div>
+
+                {/* Error breakdown */}
+                {Object.keys(summary).length > 0 && (
+                  <div className="text-[11px] text-red-600 mt-1">
+                    {Object.entries(summary).map(([reason, count]) => (
+                      <div key={reason}>
+                        {reason}: {count}
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
-              <div className="text-xs text-gray-500">
-                {job.done ?? 0}/{job.total ?? 0} done
-                {job.error > 0 && ` • ${job.error} errors`}
-              </div>
-              <div className="w-full bg-gray-200 rounded h-2 mt-1">
-                <div
-                  className="bg-blue-600 h-2 rounded"
-                  style={{ width: `${job.progress ?? 0}%` }}
-                />
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
