@@ -18,12 +18,11 @@ export default function Dashboard() {
   const [selectedJob, setSelectedJob] = useState(null);
   const [results, setResults] = useState([]);
   const [selectedUrl, setSelectedUrl] = useState(null);
-
-  // pagination state
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const limit = 200;
 
+  // ---- LOAD JOBS ----
   useEffect(() => {
     loadJobs();
   }, []);
@@ -31,8 +30,8 @@ export default function Dashboard() {
   // Auto-refresh jobs every 15s
   useEffect(() => {
     const interval = setInterval(() => {
-      if (selectedJob) selectJob(selectedJob.id, offset);
       loadJobs();
+      if (selectedJob) selectJob(selectedJob.id, offset);
     }, 15000);
     return () => clearInterval(interval);
   }, [selectedJob, offset]);
@@ -40,8 +39,9 @@ export default function Dashboard() {
   async function loadJobs() {
     try {
       const j = await api("/api/jobs");
-      setJobs(j.jobs);
-      if (!selectedJob && j.jobs.length) {
+      setJobs(j.jobs || []);
+      // auto-select first job if none selected
+      if (!selectedJob && j.jobs?.length) {
         selectJob(j.jobs[0].id, 0);
       }
     } catch (err) {
@@ -54,10 +54,10 @@ export default function Dashboard() {
       setOffset(offsetVal);
       const data = await api(`/api/job/${id}?offset=${offsetVal}&limit=${limit}`);
       setSelectedJob(data.job);
-      setResults(data.results);
-      setHasMore(data.pagination?.hasMore);
+      setResults(data.results || []);
+      setHasMore(data.pagination?.hasMore || false);
     } catch (err) {
-      console.error(err);
+      console.error("Failed to select job", err);
     }
   }
 
@@ -68,33 +68,35 @@ export default function Dashboard() {
       const data = await api(
         `/api/job/${selectedJob.id}?offset=${newOffset}&limit=${limit}`
       );
-      setResults((prev) => [...prev, ...data.results]);
+      setResults((prev) => [...prev, ...(data.results || [])]);
       setOffset(newOffset);
-      setHasMore(data.pagination?.hasMore);
+      setHasMore(data.pagination?.hasMore || false);
     } catch (err) {
       console.error("Failed to load more results", err);
     }
   }
 
   async function cancelJob(id) {
-    await api("/api/job/cancel", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jobId: id }),
-    });
-    await loadJobs();
+    try {
+      await api("/api/job/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId: id }),
+      });
+      await loadJobs();
+    } catch (err) {
+      console.error("Cancel job failed", err);
+    }
   }
 
+  // ---- CSV upload ----
   function parseCSVText(text) {
     const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (!lines.length) return [];
     const header = lines[0].toLowerCase();
-    let urls = [];
-    if (header.includes("url")) {
-      urls = lines.slice(1).map((l) => l.split(",")[0].trim());
-    } else {
-      urls = lines;
-    }
+    let urls = header.includes("url")
+      ? lines.slice(1).map((l) => l.split(",")[0].trim())
+      : lines;
     urls = urls.map((u) => (u.startsWith("http") ? u : "https://" + u));
     return [...new Set(urls)];
   }
@@ -117,22 +119,20 @@ export default function Dashboard() {
     reader.readAsText(file);
   };
 
-  // Helper to summarize error reasons
-  function summarizeErrors(results) {
-    const summary = {};
-    results.forEach((r) => {
-      if (r.status === "error" && r.error_message) {
-        const key = r.error_message.split(" ")[0]; // short reason
-        summary[key] = (summary[key] || 0) + 1;
-      }
-    });
-    return summary;
-  }
-
   const selectedResult = selectedUrl
     ? results.find((r) => r.url === selectedUrl)
     : null;
 
+  // --- ERROR SUMMARY for SELECTED JOB ---
+  const errorSummary = results
+    .filter((r) => r.status === "error" && r.error_message)
+    .reduce((acc, r) => {
+      const key = r.error_message.split(" ")[0];
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+  // ---------------------- UI ----------------------
   return (
     <div className="flex h-screen bg-gray-100">
       {/* Sidebar */}
@@ -142,66 +142,70 @@ export default function Dashboard() {
           <input type="file" accept=".csv" onChange={handleFile} />
         </div>
 
-        <div>
-          {jobs.map((job) => {
-            // build error summary for each job
-            const summary = summarizeErrors(results);
-            return (
-              <div
-                key={job.id}
-                onClick={() => selectJob(job.id, 0)}
-                className={`p-3 cursor-pointer border-b ${
-                  selectedJob?.id === job.id ? "bg-blue-100" : "hover:bg-gray-50"
-                }`}
-              >
-                <div className="flex justify-between items-center">
-                  <div className="font-medium truncate">{job.name}</div>
-                  {job.status !== "done" && job.status !== "cancelled" && (
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        cancelJob(job.id);
-                      }}
-                      className="text-xs text-red-600 hover:text-red-800"
-                    >
-                      Cancel
-                    </button>
-                  )}
-                </div>
-                <div className="text-xs text-gray-500">
-                  {job.done ?? 0}/{job.total ?? 0} done
-                  {job.error > 0 && ` • ${job.error} errors`}
-                </div>
-                <div className="w-full bg-gray-200 rounded h-2 mt-1">
-                  <div
-                    className="bg-blue-600 h-2 rounded"
-                    style={{ width: `${job.progress ?? 0}%` }}
-                  />
-                </div>
-
-                {/* Error breakdown */}
-                {Object.keys(summary).length > 0 && (
-                  <div className="text-[11px] text-red-600 mt-1">
-                    {Object.entries(summary).map(([reason, count]) => (
-                      <div key={reason}>
-                        {reason}: {count}
-                      </div>
-                    ))}
-                  </div>
+        {jobs.length === 0 ? (
+          <div className="p-4 text-gray-500 text-sm">No jobs found</div>
+        ) : (
+          jobs.map((job) => (
+            <div
+              key={job.id}
+              onClick={() => selectJob(job.id, 0)}
+              className={`p-3 cursor-pointer border-b ${
+                selectedJob?.id === job.id ? "bg-blue-100" : "hover:bg-gray-50"
+              }`}
+            >
+              <div className="flex justify-between items-center">
+                <div className="font-medium truncate">{job.name}</div>
+                {job.status !== "done" && job.status !== "cancelled" && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      cancelJob(job.id);
+                    }}
+                    className="text-xs text-red-600 hover:text-red-800"
+                  >
+                    Cancel
+                  </button>
                 )}
               </div>
-            );
-          })}
-        </div>
+              <div className="text-xs text-gray-500">
+                {job.done ?? 0}/{job.total ?? 0} done
+                {job.error > 0 && ` • ${job.error} errors`}
+              </div>
+              <div className="w-full bg-gray-200 rounded h-2 mt-1">
+                <div
+                  className="bg-blue-600 h-2 rounded"
+                  style={{ width: `${job.progress ?? 0}%` }}
+                />
+              </div>
+              {job.status === "cancelled" && (
+                <div className="text-[10px] text-red-500 mt-1">Cancelled</div>
+              )}
+            </div>
+          ))
+        )}
       </div>
 
-      {/* Main Dashboard */}
+      {/* Main Content */}
       <div className="flex-1 p-6 overflow-y-auto">
-        {selectedJob ? (
+        {!selectedJob ? (
+          <p className="text-gray-500">Select a job from the left</p>
+        ) : (
           <>
-            <div className="flex justify-between items-center mb-6">
+            <div className="flex justify-between items-center mb-4">
               <h1 className="text-2xl font-bold">{selectedJob.name}</h1>
             </div>
+
+            {/* Error breakdown for current job */}
+            {Object.keys(errorSummary).length > 0 && (
+              <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700">
+                <h3 className="font-semibold mb-1">Error Breakdown:</h3>
+                {Object.entries(errorSummary).map(([reason, count]) => (
+                  <div key={reason}>
+                    {reason}: {count}
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Results grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -211,7 +215,6 @@ export default function Dashboard() {
                   className="bg-white p-4 rounded shadow flex flex-col"
                 >
                   <h2 className="font-semibold truncate">{r.url}</h2>
-
                   <span
                     className={`inline-block px-2 py-1 text-xs rounded mt-1 ${
                       r.status === "done"
@@ -226,7 +229,6 @@ export default function Dashboard() {
                     {r.status}
                   </span>
 
-                  {/* Retry + Errors */}
                   {r.retries > 0 && (
                     <p className="text-xs text-gray-500 mt-1">
                       Retries: {r.retries}{" "}
@@ -255,33 +257,6 @@ export default function Dashboard() {
                       {r.mobile?.score ?? "--"}
                     </div>
                   </div>
-
-                  {/* Metrics */}
-                  {r.desktop && (
-                    <div className="text-sm text-gray-700">
-                      <p>
-                        <span className="font-semibold">Desktop:</span>{" "}
-                        LCP {r.desktop.lcp}, FCP {r.desktop.fcp}, TBT{" "}
-                        {r.desktop.tbt}, CLS {r.desktop.cls}
-                      </p>
-                    </div>
-                  )}
-                  {r.mobile && (
-                    <div className="text-sm text-gray-700 mt-1">
-                      <p>
-                        <span className="font-semibold">Mobile:</span>{" "}
-                        LCP {r.mobile.lcp}, FCP {r.mobile.fcp}, TBT{" "}
-                        {r.mobile.tbt}, CLS {r.mobile.cls}
-                      </p>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={() => setSelectedUrl(r.url)}
-                    className="mt-3 px-3 py-1 bg-gray-200 rounded hover:bg-gray-300 text-sm"
-                  >
-                    View Filmstrip
-                  </button>
                 </div>
               ))}
             </div>
@@ -298,51 +273,8 @@ export default function Dashboard() {
               </div>
             )}
           </>
-        ) : (
-          <p className="text-gray-500">Select a job from the left</p>
         )}
       </div>
-
-      {/* Filmstrip Drawer */}
-      {selectedResult && (
-        <div className="fixed top-0 right-0 w-full sm:w-[480px] h-full bg-white shadow-lg overflow-y-auto transition-all">
-          <div className="p-4 border-b flex justify-between items-center">
-            <h2 className="text-lg font-bold">{selectedResult.url}</h2>
-            <button
-              className="text-gray-500 hover:text-gray-800"
-              onClick={() => setSelectedUrl(null)}
-            >
-              ✕
-            </button>
-          </div>
-
-          <div className="p-4">
-            <h3 className="font-semibold mb-2">Desktop Filmstrip</h3>
-            <div className="flex gap-2 overflow-x-auto">
-              {selectedResult.desktop?.filmstrip?.map((f, i) => (
-                <img
-                  key={i}
-                  src={f.data}
-                  alt={`frame ${i}`}
-                  className="w-32 border border-gray-300"
-                />
-              ))}
-            </div>
-
-            <h3 className="font-semibold mt-4 mb-2">Mobile Filmstrip</h3>
-            <div className="flex gap-2 overflow-x-auto">
-              {selectedResult.mobile?.filmstrip?.map((f, i) => (
-                <img
-                  key={i}
-                  src={f.data}
-                  alt={`frame ${i}`}
-                  className="w-24 border border-gray-300"
-                />
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
