@@ -10,25 +10,31 @@ export default async function handler(req, res) {
   const client = await pool.connect();
 
   try {
-    // 1️⃣ Check schema only once per execution (fast)
+    console.log("🟢 STEP 1: Checking columns...");
     const columnsRes = await client.query(`
-      SELECT column_name
+      SELECT column_name, table_name
       FROM information_schema.columns
       WHERE table_name IN ('jobs', 'job_results');
     `);
-    const columns = columnsRes.rows.map(r => r.column_name);
-    const hasCreatedAt = columns.includes("created_at");
-    const hasDuration = columns.includes("duration_ms");
 
-    // 2️⃣ Get jobs (sorted safely)
+    const columns = columnsRes.rows.map(r => `${r.table_name}.${r.column_name}`);
+    console.log("✅ Found columns:", columns);
+
+    const hasCreatedAt = columns.includes("jobs.created_at");
+    const hasDuration = columns.includes("job_results.duration_ms");
+
+    console.log("🟢 STEP 2: Fetching jobs...");
     const orderBy = hasCreatedAt ? "ORDER BY created_at DESC" : "ORDER BY id DESC";
     const jobsRes = await client.query(`SELECT * FROM jobs ${orderBy}`);
     const jobs = jobsRes.rows;
 
+    console.log(`✅ STEP 2: Found ${jobs.length} jobs`);
+
     const enrichedJobs = [];
 
-    // 3️⃣ Gather stats for each job
     for (const job of jobs) {
+      console.log(`🟡 Processing job ID: ${job.id}`);
+
       const statsQuery = `
         SELECT 
           COUNT(*)::int AS total,
@@ -48,7 +54,6 @@ export default async function handler(req, res) {
       const remaining = s.remaining || 0;
       const avgDuration = s.avg_duration || 0;
 
-      // 4️⃣ Compute progress + ETA
       let progress = total > 0 ? Math.floor((done / total) * 100) : 0;
       if (done > 0 && progress === 0) progress = 1;
 
@@ -70,9 +75,10 @@ export default async function handler(req, res) {
       });
     }
 
+    console.log(`✅ STEP 3: Enriched ${enrichedJobs.length} jobs`);
     return res.json({ ok: true, jobs: enrichedJobs });
   } catch (err) {
-    console.error("❌ Error in /api/jobs:", err);
+    console.error("❌ /api/jobs error:", err.stack || err);
     return res.status(500).json({ ok: false, error: err.message });
   } finally {
     client.release();
