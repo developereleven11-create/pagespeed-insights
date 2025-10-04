@@ -3,27 +3,41 @@ name: PSI Runner
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/15 * * * *'  # every 15 minutes (change as needed)
+    - cron: '*/15 * * * *'  # runs every 15 minutes
 
 jobs:
   run-psirunner:
     runs-on: ubuntu-latest
+    timeout-minutes: 10   # stops infinite hangs if PSI API stalls
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'    # speeds up installs on repeated runs
 
-      - name: Install deps
-        run: npm ci
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
-      - name: Run runner
+      - name: Run PSI Runner
         env:
+          # 🔑 Make sure these secrets exist in your repo:
+          # Settings → Secrets → Actions → New repository secret
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          # optional tuning params
           BATCH_SIZE: 5
           FETCH_TIMEOUT_MS: 45000
           MAX_RETRIES: 4
-        run: node ./scripts/runner.js
+          NODE_ENV: production
+        run: |
+          echo "Starting PSI runner..."
+          node ./scripts/runner.js
