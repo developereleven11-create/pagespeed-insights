@@ -8,7 +8,7 @@ const pool = new Pool({
 
 export default async function handler(req, res) {
   const {
-    query: { id },
+    query: { id, offset = 0, limit = 200 },
   } = req;
 
   const client = await pool.connect();
@@ -20,7 +20,12 @@ export default async function handler(req, res) {
     }
     const job = jobRes.rows[0];
 
-    // fetch results (force jsonb → text to avoid node-pg quirks)
+    // sanitize values (avoid SQL injection, clamp limits)
+    const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
+    const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 1000); 
+    // hard cap 1000 rows per request
+
+    // fetch results with pagination
     const resultsRes = await client.query(
       `SELECT id, url, status,
               desktop::text as desktop,
@@ -28,8 +33,8 @@ export default async function handler(req, res) {
        FROM job_results
        WHERE job_id=$1
        ORDER BY id ASC
-       LIMIT 200`,
-      [id]
+       OFFSET $2 LIMIT $3`,
+      [id, safeOffset, safeLimit]
     );
 
     const results = resultsRes.rows.map((r) => ({
@@ -38,9 +43,22 @@ export default async function handler(req, res) {
       mobile: r.mobile ? JSON.parse(r.mobile) : {},
     }));
 
+    // also get total count for pagination
+    const countRes = await client.query(
+      `SELECT COUNT(*) FROM job_results WHERE job_id=$1`,
+      [id]
+    );
+    const total = parseInt(countRes.rows[0].count, 10);
+
     res.json({
       job,
       results,
+      pagination: {
+        total,
+        offset: safeOffset,
+        limit: safeLimit,
+        hasMore: safeOffset + results.length < total,
+      },
     });
   } catch (err) {
     console.error("Error fetching job details:", err);
