@@ -1,17 +1,17 @@
 // scripts/runner.js
-// Background PageSpeed runner for GitHub Actions + Neon DB
-// Safeguards: auto-reset stuck rows, throttle API calls, compact JSON storage
+// PageSpeed runner with retries, exponential backoff, longer timeout
 
 const { Pool } = require("pg");
 
 const POSTGRES_URL = process.env.POSTGRES_URL;
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 
-// Configurable knobs (via GitHub Secrets or defaults)
-const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "5", 10); // # of URLs per run
-const MAX_FRAMES = parseInt(process.env.MAX_FRAMES || "8", 10); // filmstrip frame cap
-const FETCH_TIMEOUT_MS = parseInt(process.env.FETCH_TIMEOUT_MS || "45000", 10); // 45s
-const DELAY_BETWEEN_URLS = parseInt(process.env.DELAY_BETWEEN_URLS || "5000", 10); // 5s
+// Configurable knobs
+const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || "5", 10);
+const MAX_FRAMES = parseInt(process.env.MAX_FRAMES || "8", 10);
+const FETCH_TIMEOUT_MS = parseInt(process.env.FETCH_TIMEOUT_MS || "75000", 10); // 75s
+const DELAY_BETWEEN_URLS = parseInt(process.env.DELAY_BETWEEN_URLS || "5000", 10);
+const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || "3", 10);
 
 if (!POSTGRES_URL || !GOOGLE_API_KEY) {
   console.error("❌ Missing POSTGRES_URL or GOOGLE_API_KEY env vars");
@@ -23,7 +23,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Reset rows stuck too long in "running"
+// Reset stuck rows
 async function resetStuck(client) {
   const res = await client.query(
     `UPDATE job_results
@@ -38,7 +38,7 @@ async function resetStuck(client) {
   }
 }
 
-// Atomically pick batch of pending rows
+// Pick batch atomically
 async function pickBatch(client, batchSize) {
   await client.query("BEGIN");
   const selectRes = await client.query(
@@ -130,6 +130,21 @@ async function runOne(url) {
   };
 }
 
+// Retry wrapper with exponential backoff
+async function runOneWithRetry(url, retries = MAX_RETRIES) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await runOne(url);
+    } catch (err) {
+      console.error(`⚠️ Attempt ${attempt} failed for ${url}:`, err.message);
+      if (attempt === retries) throw err;
+      const wait = attempt * 5000; // backoff: 5s, 10s, 15s...
+      console.log(`🔁 Retrying ${url} in ${wait / 1000}s...`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
 async function markJobDoneIfComplete(client, jobId) {
   const res = await client.query(
     `SELECT 1 FROM job_results WHERE job_id = $1 AND status NOT IN ('done','error') LIMIT 1`,
@@ -143,7 +158,7 @@ async function markJobDoneIfComplete(client, jobId) {
 
 (async function main() {
   console.log(
-    `🚀 PSI Runner starting — batch=${BATCH_SIZE}, delay=${DELAY_BETWEEN_URLS}ms, maxFrames=${MAX_FRAMES}`
+    `🚀 PSI Runner starting — batch=${BATCH_SIZE}, delay=${DELAY_BETWEEN_URLS}ms, timeout=${FETCH_TIMEOUT_MS}ms, retries=${MAX_RETRIES}`
   );
   const client = await pool.connect();
   try {
@@ -162,7 +177,7 @@ async function markJobDoneIfComplete(client, jobId) {
       const start = Date.now();
 
       try {
-        const { desktop, mobile } = await runOne(url);
+        const { desktop, mobile } = await runOneWithRetry(url);
         const duration_ms = Date.now() - start;
 
         await pool.query(
@@ -177,7 +192,9 @@ async function markJobDoneIfComplete(client, jobId) {
         );
 
         console.log(
-          `✅ Done [${id}] in ${(duration_ms / 1000).toFixed(1)}s (score D:${desktop.score} / M:${mobile.score})`
+          `✅ Done [${id}] in ${(duration_ms / 1000).toFixed(
+            1
+          )}s (score D:${desktop.score} / M:${mobile.score})`
         );
 
         await markJobDoneIfComplete(pool, job_id);
