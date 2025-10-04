@@ -1,30 +1,29 @@
-name: PageSpeed Runner
+name: PSI Runner
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"  # every 5 minutes
-  workflow_dispatch:        # allow manual trigger from Actions tab
+    - cron: '*/15 * * * *'  # every 15 minutes (change as needed)
 
 jobs:
-  run-runner:
+  run-psirunner:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install deps
+        run: npm ci
 
-      - name: Run PSI Runner
+      - name: Run runner
         env:
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           BATCH_SIZE: 5
-          DELAY_BETWEEN_URLS: 5000
-          MAX_FRAMES: 8
-        run: node scripts/runner.js
+          FETCH_TIMEOUT_MS: 45000
+          MAX_RETRIES: 4
+        run: node ./scripts/runner.js
