@@ -8,7 +8,7 @@ on:
 jobs:
   run-psirunner:
     runs-on: ubuntu-latest
-    timeout-minutes: 10   # stops infinite hangs if PSI API stalls
+    timeout-minutes: 10   # avoids infinite hangs
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -17,27 +17,25 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'    # speeds up installs on repeated runs
 
-      - name: Install dependencies
+      - name: Install dependencies (auto-detect)
         run: |
           if [ -f package-lock.json ]; then
+            echo "Lockfile found → using npm ci"
             npm ci
           else
+            echo "No lockfile found → using npm install"
             npm install
           fi
 
       - name: Run PSI Runner
         env:
-          # 🔑 Make sure these secrets exist in your repo:
-          # Settings → Secrets → Actions → New repository secret
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          # optional tuning params
           BATCH_SIZE: 5
           FETCH_TIMEOUT_MS: 45000
           MAX_RETRIES: 4
           NODE_ENV: production
         run: |
-          echo "Starting PSI runner..."
+          echo "🚀 Starting PSI Runner..."
           node ./scripts/runner.js
