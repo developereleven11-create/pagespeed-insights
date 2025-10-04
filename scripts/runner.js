@@ -7,8 +7,7 @@
 */
 
 import { Pool } from "pg";
-import fetch from "node-fetch"; // if your environment has global fetch you can remove this
-import AbortController from "abort-controller";
+const { AbortController } = global;
 
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL,
