@@ -17,7 +17,6 @@ export default function Dashboard() {
   const [jobs, setJobs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
   const [results, setResults] = useState([]);
-  const [running, setRunning] = useState(false);
   const [selectedUrl, setSelectedUrl] = useState(null);
 
   // pagination state
@@ -25,35 +24,35 @@ export default function Dashboard() {
   const [hasMore, setHasMore] = useState(false);
   const limit = 200;
 
-  // Load jobs on mount
   useEffect(() => {
     loadJobs();
   }, []);
 
-  // Auto-refresh jobs list every 10s
+  // Auto-refresh jobs list every 15s
   useEffect(() => {
     const interval = setInterval(() => {
+      if (selectedJob) selectJob(selectedJob.id, offset);
       loadJobs();
-    }, 10000);
+    }, 15000);
     return () => clearInterval(interval);
-  }, []);
+  }, [selectedJob, offset]);
 
   async function loadJobs() {
     try {
       const j = await api("/api/jobs");
       setJobs(j.jobs);
       if (!selectedJob && j.jobs.length) {
-        selectJob(j.jobs[0].id);
+        selectJob(j.jobs[0].id, 0);
       }
     } catch (err) {
       console.error("Failed to load jobs", err);
     }
   }
 
-  async function selectJob(id) {
+  async function selectJob(id, offsetVal = 0) {
     try {
-      setOffset(0);
-      const data = await api(`/api/job/${id}?offset=0&limit=${limit}`);
+      setOffset(offsetVal);
+      const data = await api(`/api/job/${id}?offset=${offsetVal}&limit=${limit}`);
       setSelectedJob(data.job);
       setResults(data.results);
       setHasMore(data.pagination?.hasMore);
@@ -77,7 +76,6 @@ export default function Dashboard() {
     }
   }
 
-  // Cancel a job
   async function cancelJob(id) {
     await api("/api/job/cancel", {
       method: "POST",
@@ -87,7 +85,6 @@ export default function Dashboard() {
     await loadJobs();
   }
 
-  // CSV parser
   function parseCSVText(text) {
     const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (!lines.length) return [];
@@ -102,7 +99,6 @@ export default function Dashboard() {
     return [...new Set(urls)];
   }
 
-  // Upload new CSV = new Job
   const handleFile = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -116,7 +112,7 @@ export default function Dashboard() {
         body: JSON.stringify({ name, urls: parsed }),
       });
       await loadJobs();
-      await selectJob(resp.jobId);
+      await selectJob(resp.jobId, 0);
     };
     reader.readAsText(file);
   };
@@ -138,7 +134,7 @@ export default function Dashboard() {
           {jobs.map((job) => (
             <div
               key={job.id}
-              onClick={() => selectJob(job.id)}
+              onClick={() => selectJob(job.id, 0)}
               className={`p-3 cursor-pointer border-b ${
                 selectedJob?.id === job.id ? "bg-blue-100" : "hover:bg-gray-50"
               }`}
@@ -167,9 +163,6 @@ export default function Dashboard() {
                   style={{ width: `${job.progress ?? 0}%` }}
                 />
               </div>
-              {job.status === "cancelled" && (
-                <div className="text-[10px] text-red-500 mt-1">Cancelled</div>
-              )}
             </div>
           ))}
         </div>
@@ -191,19 +184,32 @@ export default function Dashboard() {
                   className="bg-white p-4 rounded shadow flex flex-col"
                 >
                   <h2 className="font-semibold truncate">{r.url}</h2>
+
                   <span
                     className={`inline-block px-2 py-1 text-xs rounded mt-1 ${
                       r.status === "done"
                         ? "bg-green-100 text-green-700"
                         : r.status === "pending"
                         ? "bg-gray-100 text-gray-700"
-                        : r.status === "cancelled"
+                        : r.status === "error"
                         ? "bg-red-100 text-red-700"
                         : "bg-yellow-100 text-yellow-700"
                     }`}
                   >
                     {r.status}
                   </span>
+
+                  {/* Retry + Errors */}
+                  {r.retries > 0 && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      Retries: {r.retries}{" "}
+                      {r.error_message && (
+                        <span className="text-red-600">
+                          • {r.error_message}
+                        </span>
+                      )}
+                    </p>
+                  )}
 
                   {/* Scores */}
                   <div className="flex gap-4 my-4">
