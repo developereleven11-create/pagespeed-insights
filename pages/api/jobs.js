@@ -1,86 +1,63 @@
-import pkg from "pg";
-const { Pool } = pkg;
+// /pages/api/jobs.js
+import { Pool } from "pg";
 
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
 });
 
 export default async function handler(req, res) {
-  const client = await pool.connect();
-
   try {
-    console.log("🟢 STEP 1: Checking columns...");
-    const columnsRes = await client.query(`
-      SELECT column_name, table_name
-      FROM information_schema.columns
-      WHERE table_name IN ('jobs', 'job_results');
-    `);
+    // simple pagination
+    const page = Math.max(1, parseInt(req.query.page || "1", 10));
+    const perPage = Math.max(10, Math.min(100, parseInt(req.query.perPage || "20", 10)));
+    const offset = (page - 1) * perPage;
 
-    const columns = columnsRes.rows.map(r => `${r.table_name}.${r.column_name}`);
-    console.log("✅ Found columns:", columns);
-
-    const hasCreatedAt = columns.includes("jobs.created_at");
-    const hasDuration = columns.includes("job_results.duration_ms");
-
-    console.log("🟢 STEP 2: Fetching jobs...");
-    const orderBy = hasCreatedAt ? "ORDER BY created_at DESC" : "ORDER BY id DESC";
-    const jobsRes = await client.query(`SELECT * FROM jobs ${orderBy}`);
-    const jobs = jobsRes.rows;
-
-    console.log(`✅ STEP 2: Found ${jobs.length} jobs`);
-
-    const enrichedJobs = [];
-
-    for (const job of jobs) {
-      console.log(`🟡 Processing job ID: ${job.id}`);
-
-      const statsQuery = `
-        SELECT 
-          COUNT(*)::int AS total,
-          COUNT(*) FILTER (WHERE status='done')::int AS done,
-          COUNT(*) FILTER (WHERE status='error')::int AS error,
-          COUNT(*) FILTER (WHERE status IN ('pending','running'))::int AS remaining
-          ${hasDuration ? ", AVG(duration_ms)::float AS avg_duration" : ""}
+    // Query: fetch jobs with counts using safe aggregates (handles missing job_results gracefully)
+    const jobsQuery = `
+      SELECT
+        j.id,
+        j.name,
+        j.status,
+        j.created_at,
+        COALESCE(sub.total, 0) AS total,
+        COALESCE(sub.pending, 0) AS pending,
+        COALESCE(sub.completed, 0) AS completed,
+        COALESCE(sub.failed, 0) AS failed,
+        COALESCE(sub.avg_duration_ms, 0) AS avg_duration_ms
+      FROM jobs j
+      LEFT JOIN (
+        SELECT
+          job_id,
+          COUNT(*) AS total,
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+          AVG(duration_ms) AS avg_duration_ms
         FROM job_results
-        WHERE job_id = $1;
-      `;
-      const statsRes = await client.query(statsQuery, [job.id]);
-      const s = statsRes.rows[0] || {};
+        GROUP BY job_id
+      ) sub ON sub.job_id = j.id
+      ORDER BY j.created_at DESC
+      LIMIT $1 OFFSET $2
+    `;
 
-      const total = s.total || 0;
-      const done = s.done || 0;
-      const error = s.error || 0;
-      const remaining = s.remaining || 0;
-      const avgDuration = s.avg_duration || 0;
+    const { rows } = await pool.query(jobsQuery, [perPage, offset]);
 
-      let progress = total > 0 ? Math.floor((done / total) * 100) : 0;
-      if (done > 0 && progress === 0) progress = 1;
+    // total jobs count for UI
+    const totalRes = await pool.query("SELECT COUNT(*)::int AS count FROM jobs");
+    const totalJobs = totalRes.rows?.[0]?.count || 0;
 
-      let eta = null;
-      if (avgDuration && remaining > 0) {
-        eta = Math.max(1, Math.round((avgDuration * remaining) / 60000));
-      } else if (remaining > 0) {
-        eta = "Calculating...";
-      }
-
-      enrichedJobs.push({
-        ...job,
-        total,
-        done,
-        error,
-        remaining,
-        progress,
-        etaMinutes: eta,
-      });
-    }
-
-    console.log(`✅ STEP 3: Enriched ${enrichedJobs.length} jobs`);
-    return res.json({ ok: true, jobs: enrichedJobs });
+    res.status(200).json({
+      ok: true,
+      data: rows,
+      meta: {
+        page,
+        perPage,
+        totalJobs,
+      },
+    });
   } catch (err) {
-    console.error("❌ /api/jobs error:", err.stack || err);
-    return res.status(500).json({ ok: false, error: err.message });
-  } finally {
-    client.release();
+    console.error("API /api/jobs error:", err);
+    res.status(500).json({ ok: false, error: "Internal Server Error", detail: err.message });
   }
 }
