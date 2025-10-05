@@ -4,8 +4,12 @@
   --------------------------------------
   ✅ Fetches PSI data for URLs
   ✅ Saves only metrics + filmstrip screenshots
+  ✅ Forces IPv4 to avoid Supabase IPv6 ENETUNREACH issues
   ❌ Skips storing full Lighthouse JSONs
 */
+
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first"); // 👈 Force IPv4 for all network requests
 
 import { Pool } from "pg";
 const { AbortController, fetch } = global;
@@ -55,7 +59,7 @@ async function callPSI(urlToTest, strategy = "mobile") {
       }
       const json = await resp.json();
 
-      // Extract only what we need
+      // Extract only metrics + filmstrip
       const metrics = {
         strategy,
         lcp: extractSafe(json, "lighthouseResult.audits.largest-contentful-paint.numericValue"),
@@ -68,7 +72,6 @@ async function callPSI(urlToTest, strategy = "mobile") {
         fetchTime: extractSafe(json, "analysisUTCTimestamp"),
       };
 
-      // Extract filmstrip (small data)
       const filmstrip =
         extractSafe(json, "lighthouseResult.audits.screenshot-thumbnails.details.items") || [];
 
@@ -105,7 +108,10 @@ async function pickPendingBatch(batchSize) {
       return [];
     }
     const ids = rows.map((r) => r.id);
-    await client.query(`UPDATE job_results SET status='in_progress', started_at = NOW() WHERE id = ANY($1::int[])`, [ids]);
+    await client.query(
+      `UPDATE job_results SET status='in_progress', started_at = NOW() WHERE id = ANY($1::int[])`,
+      [ids]
+    );
     await client.query("COMMIT");
     return rows;
   } catch (err) {
@@ -134,7 +140,6 @@ async function processItem(item) {
     const duration_ms = Date.now() - start;
     const status = data.mobile || data.desktop ? "completed" : "failed";
 
-    // Save only the minimal clean data
     await pool.query(
       `
         UPDATE job_results
@@ -151,7 +156,7 @@ async function processItem(item) {
 
     console.log(`${status === "completed" ? "✅" : "❌"} [${id}] ${url} → ${status} (${duration_ms} ms)`);
   } catch (err) {
-    console.error(`processItem error for [${id}] ${url}:`, err);
+    console.error(`processItem error for [${id}] ${url}:`, err.message);
     await pool.query(
       `UPDATE job_results SET status='failed', completed_at = NOW(), duration_ms=$1 WHERE id=$2`,
       [Date.now() - start, id]
