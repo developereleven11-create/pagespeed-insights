@@ -18,15 +18,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm' # speeds up future runs
+          cache: 'npm'
 
-      - name: Install dependencies (auto-detect)
+      - name: Install dependencies
         run: |
+          echo "📦 Installing dependencies..."
           if [ -f package-lock.json ]; then
-            echo "Lockfile found → using npm ci"
+            echo "✅ package-lock.json found → using npm ci"
             npm ci
           else
-            echo "No lockfile found → using npm install"
+            echo "⚠️ No lockfile found → using npm install"
             npm install
           fi
 
@@ -35,10 +36,10 @@ jobs:
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           BATCH_SIZE: 5
-          FETCH_TIMEOUT_MS: 90000   # allow more time for PSI responses
+          FETCH_TIMEOUT_MS: 90000
           MAX_RETRIES: 4
           NODE_ENV: production
-          PGHOSTADDR: "0.0.0.0"    # 👈 forces IPv4 (critical fix for Supabase)
+          PGHOSTADDR: "0.0.0.0"   # forces IPv4 (Supabase fix)
         run: |
           echo "🚀 Starting PSI Runner..."
           node ./scripts/runner.js
